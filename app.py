@@ -11,7 +11,7 @@ st.info("💡 已移除外部绘图依赖，修复了 'matplotlib' 报错问题�
 
 # === 侧边栏 ===
 st.sidebar.header("🔑 AI 设置")
-default_key = "sk-55cc3f56742f4e43be099c9489e02911"
+default_key = ""
 deepseek_key = st.sidebar.text_input("DeepSeek API Key", value=default_key, type="password")
 product_name = st.sidebar.text_input("产品名称", value="LED Makeup Mirror")
 
@@ -192,3 +192,4 @@ if file_bulk and file_term:
             with st.spinner("AI 分析中..."):
                 report = call_deepseek_analysis(deepseek_key, product_name, ai_waste_data, ai_bid_summary)
                 st.markdown(report)
+
