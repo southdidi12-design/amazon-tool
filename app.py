@@ -7,9 +7,9 @@ from datetime import datetime
 
 # === 1. 全局配置 ===
 st.set_page_config(
-    page_title="Amazon AI 指挥官 (v5.11 闪电版)", 
+    page_title="Amazon AI 指挥官 (v5.12 透视版)", 
     layout="wide", 
-    page_icon="⚡",
+    page_icon="👁️",
     initial_sidebar_state="expanded"
 )
 
@@ -20,31 +20,27 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stButton>button { width: 100%; border-radius: 4px; }
     .ai-thought { background-color: #f1f3f4; padding: 10px; border-radius: 5px; font-size: 13px; margin-top: 5px;}
+    .asin-link { font-size: 14px; margin-bottom: 10px; display: block; color: #0066c0; text-decoration: none; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
 # === 2. 核心逻辑 ===
 DATA_FILE = "deepseek_cot_data.jsonl"
 
-# A. ⚡ 人工瞬杀 (不调 API，极速保存)
 def save_manual_label(term, spend, clicks, orders, action):
-    # 构造一条“人工专家”数据
     train_data = {
         "messages": [
             {"role": "system", "content": "PPC专家"},
             {"role": "user", "content": f"词:{term}, 费:{spend}, 单:{orders}"},
-            {"role": "assistant", "content": f"【人工专家裁决】\n经验判断：数据表现极差或语义明显不符。\n-> 操作: {action}"}
+            {"role": "assistant", "content": f"【人工裁决】\n-> 操作: {action}"}
         ]
     }
     with open(DATA_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(train_data, ensure_ascii=False) + "\n")
-    st.toast(f"⚡ 已瞬杀: {term}")
+    st.toast(f"⚡ 已处理: {term}")
 
-# B. 🤖 AI 深度思考 (调 API，慢但详细)
 def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_intent):
     if not api_key: return None
-    
-    # 自动计算 CPC
     cpc = spend / clicks if clicks > 0 else 0
     prompt = f"""
     你是一个冷酷的亚马逊广告数据分析师。产品: Makeup Mirror。对象: "{term}"。
@@ -56,7 +52,6 @@ def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_inte
     
     我的倾向: {user_intent}。
     """
-
     try:
         with st.spinner(f"⏳ AI 思考中..."):
             res = requests.post(
@@ -66,7 +61,6 @@ def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_inte
             )
             if res.status_code == 200:
                 ai_json = json.loads(res.json()['choices'][0]['message']['content'])
-                # 保存
                 train_data = {
                     "messages": [
                         {"role": "system", "content": "PPC数据分析师"},
@@ -80,13 +74,12 @@ def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_inte
     except: return None
 
 # === 3. 侧边栏 ===
-st.sidebar.title("⚡ 控制台 v5.11")
+st.sidebar.title("👁️ 控制台 v5.12")
 default_key = "sk-55cc3f56742f4e43be099c9489e02911"
 deepseek_key = st.sidebar.text_input("🔑 DeepSeek Key", value=default_key, type="password")
 product_name = st.sidebar.text_input("📦 产品名称", value="Makeup Mirror")
 
 st.sidebar.markdown("---")
-# 阈值
 with st.sidebar.expander("⚙️ 规则设置", expanded=True):
     target_acos = st.slider("目标 ACoS", 0.1, 1.0, 0.3)
     gold_acos = st.slider("黄金词 ACoS 上限", 0.1, 1.0, 0.2)
@@ -94,11 +87,11 @@ with st.sidebar.expander("⚙️ 规则设置", expanded=True):
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r", encoding="utf-8") as f: count = sum(1 for _ in f)
     st.sidebar.metric("📚 已积累教材", f"{count} 条")
-    with open(DATA_FILE, "r", encoding="utf-8") as f: st.sidebar.download_button("📥 下载训练数据", f, file_name="finetune_fast.jsonl")
+    with open(DATA_FILE, "r", encoding="utf-8") as f: st.sidebar.download_button("📥 下载训练数据", f, file_name="finetune_xray.jsonl")
 
 # === 4. 主界面 ===
-st.title("⚡ Amazon AI 指挥官 (v5.11 闪电瞬杀版)")
-st.caption("🚀 左键瞬杀(人工) | 右键求助(AI) | 效率与深度兼得")
+st.title("👁️ Amazon AI 指挥官 (v5.12 透视眼版)")
+st.caption("🚀 增加：点击量/CPC显示 | 增加：ASIN 一键跳转链接")
 
 c1, c2 = st.columns(2)
 with c1:
@@ -106,7 +99,7 @@ with c1:
 with c2:
     file_term = st.file_uploader("📂 2. 上传 Search Term 表格", type=['xlsx', 'csv'], key="term")
 
-# 智能读取 Bulk
+# 智能读取
 def smart_load_bulk(file):
     if not file: return pd.DataFrame()
     try:
@@ -122,7 +115,6 @@ def smart_load_bulk(file):
 
 df_bulk = smart_load_bulk(file_bulk)
 
-# Search Term 读取
 def load_simple(file):
     if not file: return pd.DataFrame()
     try:
@@ -135,7 +127,7 @@ df_term = load_simple(file_term)
 if not df_bulk.empty: df_bulk.columns = df_bulk.columns.astype(str).str.strip()
 if not df_term.empty: df_term.columns = df_term.columns.astype(str).str.strip()
 
-# 全局数据预处理
+# 全局预处理
 bulk_ready = False
 df_kws = pd.DataFrame()
 bk_cols = {}
@@ -162,10 +154,9 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "⚡ 快速清洗", "📈 数据看板", "💰 竞价优化", "🏆 黄金词", "💫 关联分析"
 ])
 
-# --- Tab 1: 快速清洗 (核心改动) ---
+# --- Tab 1: 快速清洗 (透视升级) ---
 with tab1:
-    st.subheader("⚡ 快速清洗 (Manual Speed Mode)")
-    st.info("💡 提示：左边按钮是【瞬杀】（不经过AI，极速保存），右边按钮是【求助】（让AI分析）。")
+    st.subheader("⚡ 快速清洗 (透视模式)")
     
     if not df_term.empty:
         c_term = '客户搜索词'
@@ -179,33 +170,41 @@ with tab1:
             df_term[c_clicks] = pd.to_numeric(df_term[c_clicks], errors='coerce').fillna(0)
             
             mask = (df_term[c_orders] == 0) & (df_term[c_spend] > 0)
-            review_df = df_term[mask].sort_values(by=c_spend, ascending=False).head(20) # 多显示一点
+            review_df = df_term[mask].sort_values(by=c_spend, ascending=False).head(20)
             
             if not review_df.empty:
                 for idx, row in review_df.iterrows():
-                    # 布局优化：更紧凑
-                    with st.expander(f"📝 {row[c_term]} (Spend: ${row[c_spend]:.2f})", expanded=True):
+                    # 🔥 算 CPC
+                    term_val = str(row[c_term])
+                    spend_val = row[c_spend]
+                    clicks_val = row[c_clicks]
+                    cpc_val = spend_val / clicks_val if clicks_val > 0 else 0
+                    
+                    # 🔥 生成详细标题
+                    label = f"📝 {term_val} | 💸 ${spend_val:.2f} | 🖱️ 点击:{int(clicks_val)} | CPC: ${cpc_val:.2f}"
+                    
+                    with st.expander(label, expanded=True):
+                        # 🔥 如果是 ASIN，显示跳转链接
+                        if term_val.lower().startswith("b0"):
+                            st.markdown(f"🔗 [点击查看此 ASIN ({term_val})](https://www.amazon.com/dp/{term_val})", unsafe_allow_html=True)
+                        
                         c1, c2, c3 = st.columns([1, 1, 3])
                         
-                        # 1. 瞬杀按钮 (红)
                         with c1:
-                            if st.button("⚡ 瞬杀 (直接否)", key=f"fast_kill_{idx}", type="primary"):
-                                save_manual_label(row[c_term], row[c_spend], row[c_clicks], 0, "Negative")
+                            if st.button("⚡ 瞬杀", key=f"kill_{idx}", type="primary"):
+                                save_manual_label(term_val, spend_val, clicks_val, 0, "Negative")
                         
-                        # 2. 瞬留按钮 (绿)
                         with c2:
-                            if st.button("👀 瞬留 (直接留)", key=f"fast_keep_{idx}"):
-                                save_manual_label(row[c_term], row[c_spend], row[c_clicks], 0, "Keep")
+                            if st.button("👀 瞬留", key=f"keep_{idx}"):
+                                save_manual_label(term_val, spend_val, clicks_val, 0, "Keep")
                         
-                        # 3. AI 求助区 (灰)
                         with c3:
-                            if st.button("🤖 拿不准，问AI", key=f"ask_ai_{idx}"):
-                                reasoning = generate_and_save_ai_thought(deepseek_key, row[c_term], row[c_spend], row[c_clicks], 0, "Unknown")
-                                if reasoning: st.session_state[f"ai_res_{idx}"] = reasoning
+                            if st.button("🤖 问AI", key=f"ask_{idx}"):
+                                reasoning = generate_and_save_ai_thought(deepseek_key, term_val, spend_val, clicks_val, 0, "Unknown")
+                                if reasoning: st.session_state[f"ai_{idx}"] = reasoning
                             
-                            # 显示 AI 结果
-                            if f"ai_res_{idx}" in st.session_state:
-                                st.markdown(f"""<div class="ai-thought">{st.session_state[f"ai_res_{idx}"]}</div>""", unsafe_allow_html=True)
+                            if f"ai_{idx}" in st.session_state:
+                                st.markdown(f"""<div class="ai-thought">{st.session_state[f"ai_{idx}"]}</div>""", unsafe_allow_html=True)
 
             else: st.success("没有发现高花费0转化的词。")
     else: st.info("请上传 Search Term 表格")
