@@ -7,7 +7,7 @@ from datetime import datetime
 
 # === 1. 全局配置 ===
 st.set_page_config(
-    page_title="Amazon AI 指挥官 (v5.7)", 
+    page_title="Amazon AI 指挥官 (v5.8)", 
     layout="wide", 
     page_icon="🚀",
     initial_sidebar_state="expanded"
@@ -74,20 +74,25 @@ def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_inte
         st.error(f"网络错误: {e}")
 
 # === 3. 侧边栏 ===
-st.sidebar.title("🚀 控制台 v5.7")
+st.sidebar.title("🚀 控制台 v5.8")
 default_key = "sk-55cc3f56742f4e43be099c9489e02911"
 deepseek_key = st.sidebar.text_input("🔑 DeepSeek Key", value=default_key, type="password")
 product_name = st.sidebar.text_input("📦 产品名称", value="Makeup Mirror")
 
 st.sidebar.markdown("---")
+# 阈值控制 (这会影响后面的竞价建议)
+with st.sidebar.expander("⚙️ 规则设置", expanded=True):
+    target_acos = st.slider("目标 ACoS", 0.1, 1.0, 0.3, help="高于这个值会被建议降价")
+    gold_acos = st.slider("黄金词 ACoS 上限", 0.1, 1.0, 0.2, help="低于这个值的出单词是黄金词")
+
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r", encoding="utf-8") as f: count = sum(1 for _ in f)
     st.sidebar.metric("📚 已积累教材", f"{count} 条")
     with open(DATA_FILE, "r", encoding="utf-8") as f: st.sidebar.download_button("📥 下载训练数据", f, file_name="finetune.jsonl")
 
 # === 4. 主界面 ===
-st.title("🚀 Amazon AI 指挥官 (v5.7 翻页修复版)")
-st.caption("✅ 修复：自动跳过 '广告组合' 表，直达 '关键词' 表")
+st.title("🚀 Amazon AI 指挥官 (v5.8 全功能版)")
+st.caption("✅ 竞价优化 & 黄金词逻辑已实装 | 共享数据源")
 
 c1, c2 = st.columns(2)
 with c1:
@@ -95,36 +100,22 @@ with c1:
 with c2:
     file_term = st.file_uploader("📂 2. 上传 Search Term 表格", type=['xlsx', 'csv'], key="term")
 
-# 🔥🔥🔥 核心修复：更严格的表头判断 🔥🔥🔥
+# 智能读取 Bulk
 def smart_load_bulk(file):
     if not file: return pd.DataFrame()
     try:
         if file.name.endswith('.csv'): return pd.read_csv(file)
         
-        # 读 Excel 所有 Sheet
         dfs = pd.read_excel(file, sheet_name=None, engine='openpyxl')
-        
-        # 遍历 Sheet
         for sheet_name, df in dfs.items():
             cols = df.columns.astype(str).tolist()
-            
-            # 条件升级：必须同时有 '实体层级' AND ('关键词文本' OR '投放')
-            # 这样就能过滤掉只有 '实体层级' 的 Portfolio 表了
-            has_record_type = any(x in cols for x in ['实体层级', 'Record Type'])
-            has_keyword_col = any(x in cols for x in ['关键词文本', 'Keyword Text', '投放', 'Targeting'])
-            
-            if has_record_type and has_keyword_col:
-                st.toast(f"✅ 成功定位：在工作表 '{sheet_name}' 中找到关键词！")
+            has_record = any(x in cols for x in ['实体层级', 'Record Type'])
+            has_kw = any(x in cols for x in ['关键词文本', 'Keyword Text', '投放', 'Targeting'])
+            if has_record and has_kw:
+                st.toast(f"✅ 定位数据表: {sheet_name}")
                 return df
-                
-        st.error("❌ 遍历了所有工作表，都没找到同时包含 '实体层级' 和 '关键词文本' 的表。")
-        # 调试信息：把所有表名打出来
-        st.write(f"检测到的工作表: {list(dfs.keys())}")
         return pd.DataFrame()
-        
-    except Exception as e: 
-        st.error(f"读取失败: {e}")
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 df_bulk = smart_load_bulk(file_bulk)
 
@@ -141,9 +132,39 @@ df_term = load_simple(file_term)
 if not df_bulk.empty: df_bulk.columns = df_bulk.columns.astype(str).str.strip()
 if not df_term.empty: df_term.columns = df_term.columns.astype(str).str.strip()
 
+# 🔥🔥🔥 核心：全局数据预处理 (所有 Tab 共用) 🔥🔥🔥
+bulk_ready = False
+df_kws = pd.DataFrame()
+bk_cols = {}
+
+if not df_bulk.empty:
+    cols = df_bulk.columns
+    # 自动列名匹配
+    bk_cols['spend'] = '花费'
+    bk_cols['sales'] = next((c for c in ['销量', '销售额', '7天总销售额', 'Sales'] if c in cols), None)
+    bk_cols['clicks'] = '点击量'
+    bk_cols['entity'] = '实体层级'
+    bk_cols['kw'] = next((c for c in ['关键词文本', '投放'] if c in cols), None)
+    bk_cols['bid'] = next((c for c in ['竞价', 'Keyword Bid'] if c in cols), None)
+    bk_cols['orders'] = '订单数量'
+
+    if bk_cols['entity'] and bk_cols['kw'] and bk_cols['sales'] and bk_cols['spend']:
+        # 1. 筛选出关键词行
+        df_kws = df_bulk[df_bulk[bk_cols['entity']].astype(str).str.contains('Keyword|关键词|Targeting', case=False, na=False)].copy()
+        
+        # 2. 转换数值
+        for c in [bk_cols['spend'], bk_cols['sales'], bk_cols['clicks'], bk_cols['bid'], bk_cols['orders']]:
+            if c: df_kws[c] = pd.to_numeric(df_kws[c], errors='coerce').fillna(0)
+        
+        # 3. 计算 ACoS
+        df_kws['ACoS'] = df_kws.apply(lambda x: x[bk_cols['spend']]/x[bk_cols['sales']] if x[bk_cols['sales']]>0 else 0, axis=1)
+        bulk_ready = True
+    else:
+        st.error(f"Bulk 表格缺少关键列，请检查: {bk_cols}")
+
 # === 5. 功能标签页 ===
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🧠 AI 训练", "📈 数据看板", "💫 关联分析", "💰 竞价优化", "🏆 黄金词"
+    "🧠 AI 训练", "📈 数据看板", "💰 竞价优化", "🏆 黄金词", "💫 关联分析"
 ])
 
 # --- Tab 1: AI 训练 ---
@@ -155,7 +176,8 @@ with tab1:
         c_orders = '7天总订单数(#)'
         c_clicks = '点击量'
         
-        if c_term in df_term.columns and c_spend in df_term.columns:
+        if c_term in df_term.columns:
+            # 数据处理
             df_term[c_spend] = pd.to_numeric(df_term[c_spend], errors='coerce').fillna(0)
             df_term[c_orders] = pd.to_numeric(df_term[c_orders], errors='coerce').fillna(0)
             df_term[c_clicks] = pd.to_numeric(df_term[c_clicks], errors='coerce').fillna(0)
@@ -164,93 +186,99 @@ with tab1:
             review_df = df_term[mask].sort_values(by=c_spend, ascending=False).head(10)
             
             if not review_df.empty:
-                st.write("👇 点击按钮生成分析逻辑：")
                 for idx, row in review_df.iterrows():
                     with st.expander(f"📝 {row[c_term]} (Cost: ${row[c_spend]:.2f})"):
                         c1, c2 = st.columns(2)
                         with c1:
-                            if st.button("❌ 否定 (AI)", key=f"neg_{idx}", type="primary"):
-                                r = generate_and_save_ai_thought(deepseek_key, row[c_term], row[c_spend], row[c_clicks], 0, "Negative")
-                                if r: st.info(f"AI: {r}")
+                            if st.button("❌ 否定 (AI)", key=f"n_{idx}"):
+                                generate_and_save_ai_thought(deepseek_key, row[c_term], row[c_spend], row[c_clicks], 0, "Negative")
                         with c2:
-                            if st.button("👀 观察 (AI)", key=f"keep_{idx}"):
-                                r = generate_and_save_ai_thought(deepseek_key, row[c_term], row[c_spend], row[c_clicks], 0, "Keep")
-                                if r: st.info(f"AI: {r}")
+                            if st.button("👀 观察 (AI)", key=f"k_{idx}"):
+                                generate_and_save_ai_thought(deepseek_key, row[c_term], row[c_spend], row[c_clicks], 0, "Keep")
             else: st.success("无浪费词")
-        else: st.error("Search Term 列名不匹配")
     else: st.info("请上传 Search Term")
 
-# --- Tab 2: 看板 (修复核心) ---
+# --- Tab 2: 看板 ---
 with tab2:
     st.subheader("📈 账户透视")
-    if not df_bulk.empty:
-        cols = df_bulk.columns
+    if bulk_ready:
+        t_spend = df_kws[bk_cols['spend']].sum()
+        t_sales = df_kws[bk_cols['sales']].sum()
+        m1, m2 = st.columns(2)
+        m1.metric("总花费", f"${t_spend:,.2f}")
+        m2.metric("总销售额", f"${t_sales:,.2f}")
         
-        # 1. 找花费
-        bk_c_spend = '花费'
-        
-        # 2. 找销售额 (兼容 '销量' 和 '销售额')
-        bk_c_sales = None
-        for candidate in ['销量', '销售额', '7天总销售额', 'Sales', 'Attributed Sales 7d']:
-            if candidate in cols:
-                bk_c_sales = candidate
-                break
-        
-        # 3. 找点击
-        bk_c_clicks = '点击量'
-        
-        # 4. 找实体 & 关键词
-        bk_c_entity = '实体层级'
-        bk_c_kw = '关键词文本' # 或者 '投放'
-        if '关键词文本' not in cols and '投放' in cols: bk_c_kw = '投放'
+        chart_data = df_kws[df_kws[bk_cols['spend']]>0]
+        st.scatter_chart(chart_data, x=bk_cols['spend'], y=bk_cols['sales'], size=bk_cols['clicks'], color='ACoS')
+    else: st.info("等待 Bulk 数据...")
 
-        if bk_c_entity in cols and bk_c_kw in cols and bk_c_sales and bk_c_spend in cols:
-            # 筛选
-            df_kws = df_bulk[df_bulk[bk_c_entity].astype(str).str.contains('Keyword|关键词|Targeting', case=False, na=False)].copy()
-            
-            # 转换数字
-            for c in [bk_c_spend, bk_c_sales, bk_c_clicks]:
-                df_kws[c] = pd.to_numeric(df_kws[c], errors='coerce').fillna(0)
-            
-            # 计算 ACoS
-            df_kws['ACoS'] = df_kws.apply(lambda x: x[bk_c_spend]/x[bk_c_sales] if x[bk_c_sales]>0 else 0, axis=1)
-            
-            # 核心指标
-            t_spend = df_kws[bk_c_spend].sum()
-            t_sales = df_kws[bk_c_sales].sum()
-            t_acos = t_spend / t_sales if t_sales > 0 else 0
-            
-            m1, m2, m3 = st.columns(3)
-            m1.metric("总花费", f"${t_spend:,.2f}")
-            m2.metric("总销售额", f"${t_sales:,.2f}")
-            m3.metric("综合 ACoS", f"{t_acos:.2%}")
-            
-            # 图表
-            st.markdown(f"#### 🔍 关键词分布 (基于列: {bk_c_spend} vs {bk_c_sales})")
-            chart_data = df_kws[df_kws[bk_c_spend]>0]
-            if not chart_data.empty:
-                st.scatter_chart(chart_data, x=bk_c_spend, y=bk_c_sales, size=bk_c_clicks, color='ACoS')
-            else: st.info("无花费数据")
-            
-        else: 
-            st.error(f"列名匹配失败。没找到: {bk_c_sales if not bk_c_sales else ''}")
-            st.write(f"当前所有列名: {list(cols)}")
-    else: st.info("请上传 Bulk 表格")
-
-# --- Tab 3: 关联分析 ---
+# --- Tab 3: 竞价优化 (逻辑已恢复) ---
 with tab3:
+    st.subheader("💰 竞价优化建议")
+    st.caption(f"筛选条件: 出单了，但 ACoS 高于 {target_acos*100}%")
+    
+    if bulk_ready:
+        # 筛选: 有订单 且 ACoS > 目标
+        bad_kws = df_kws[
+            (df_kws[bk_cols['orders']] > 0) & 
+            (df_kws['ACoS'] > target_acos)
+        ].sort_values(by='ACoS', ascending=False).head(50)
+        
+        if not bad_kws.empty:
+            # 整理显示列
+            show_df = bad_kws[[bk_cols['kw'], bk_cols['bid'], 'ACoS', bk_cols['spend'], bk_cols['sales']]].copy()
+            show_df['建议竞价'] = show_df[bk_cols['bid']] * 0.8 # 建议打8折
+            
+            st.dataframe(
+                show_df,
+                column_config={
+                    "ACoS": st.column_config.ProgressColumn(format="%.2f", min_value=0, max_value=2),
+                    bk_cols['bid']: st.column_config.NumberColumn("当前Bid", format="$%.2f"),
+                    "建议竞价": st.column_config.NumberColumn("建议Bid (-20%)", format="$%.2f"),
+                },
+                use_container_width=True
+            )
+        else:
+            st.success("🎉 太棒了！没有发现 ACoS 超标的词。")
+    else: st.info("等待 Bulk 数据...")
+
+# --- Tab 4: 黄金词 (逻辑已恢复) ---
+with tab4:
+    st.subheader("🏆 黄金词挖掘")
+    st.caption(f"筛选条件: 订单>=2 且 ACoS 低于 {gold_acos*100}%")
+    
+    if bulk_ready:
+        # 筛选: 订单>=2 且 ACoS < 黄金线
+        gold_df = df_kws[
+            (df_kws[bk_cols['orders']] >= 2) & 
+            (df_kws['ACoS'] > 0) & 
+            (df_kws['ACoS'] < gold_acos)
+        ].sort_values(by=bk_cols['sales'], ascending=False).head(50)
+        
+        if not gold_df.empty:
+            show_df = gold_df[[bk_cols['kw'], bk_cols['bid'], 'ACoS', bk_cols['sales']]].copy()
+            show_df['建议竞价'] = show_df[bk_cols['bid']] * 1.2 # 建议提价
+            
+            st.dataframe(
+                show_df,
+                column_config={
+                    "ACoS": st.column_config.ProgressColumn(format="%.2f", max_value=0.5),
+                    "建议竞价": st.column_config.NumberColumn("建议Bid (+20%)", format="$%.2f"),
+                },
+                use_container_width=True
+            )
+            st.balloons() # 只有发现黄金词时才放气球
+        else:
+            st.info(f"暂时没发现超级黄金词 (ACoS < {gold_acos*100}%)。建议在侧边栏调高一点阈值试试？")
+    else: st.info("等待 Bulk 数据...")
+
+# --- Tab 5: 关联分析 ---
+with tab5:
     st.subheader("💫 关联分析")
     if not df_term.empty:
         c_halo = '7天内其他SKU销售量(#)'
         if c_halo in df_term.columns:
             df_term[c_halo] = pd.to_numeric(df_term[c_halo], errors='coerce').fillna(0)
-            halo_df = df_term[df_term[c_halo]>0].sort_values(by=c_halo, ascending=False).head(20)
-            if not halo_df.empty:
-                st.write(f"共发现 {int(df_term[c_halo].sum())} 个关联订单：")
-                st.dataframe(halo_df[['客户搜索词', c_halo, '花费']], use_container_width=True)
+            halo = df_term[df_term[c_halo]>0].sort_values(by=c_halo, ascending=False).head(20)
+            if not halo.empty: st.dataframe(halo[['客户搜索词', c_halo, '花费']], use_container_width=True)
             else: st.info("无关联订单")
-        else: st.warning(f"缺少列: {c_halo}")
-
-# --- Tab 4, 5 (复用逻辑) ---
-with tab4: st.write("💰 竞价优化 (逻辑同图表，已恢复)")
-with tab5: st.write("🏆 黄金词 (逻辑同图表，已恢复)")
