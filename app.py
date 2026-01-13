@@ -7,7 +7,7 @@ from datetime import datetime
 
 # === 1. 全局配置 ===
 st.set_page_config(
-    page_title="Amazon AI 指挥官 (v5.0 终极版)", 
+    page_title="Amazon AI 训练师 (v5.1 懒人版)", 
     layout="wide", 
     page_icon="🧠",
     initial_sidebar_state="expanded"
@@ -18,38 +18,83 @@ st.markdown("""
     .main { background-color: #f8f9fa; }
     div[data-testid="stMetric"] { background-color: white; border: 1px solid #ddd; padding: 10px; border-radius: 8px; }
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { background-color: white; border-radius: 4px; }
     .stButton>button { width: 100%; border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
-# === 2. 核心：训练数据记录器 (你的教材本) ===
-DATA_FILE = "deepseek_training_data.jsonl"
+# === 2. 核心：AI 自动思考并记录 (CoT 生成器) ===
+DATA_FILE = "deepseek_cot_data.jsonl"
 
-def save_training_example(term, spend, clicks, orders, action, reason):
-    """保存你的决策，用于未来微调 DeepSeek"""
-    # 1. 题目 (User)
-    user_prompt = f"分析亚马逊搜索词：'{term}'。数据：花费${spend}, 点击{clicks}, 订单{orders}。"
-    # 2. 答案 (Assistant)
-    assistant_reply = f"建议：{action}。原因：{reason}"
+def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_intent):
+    """
+    1. 调用 DeepSeek 生成深度思考
+    2. 将思考过程 + 结论 保存为训练数据
+    """
+    if not api_key:
+        st.error("❌ 需要 API Key 才能生成 AI 思考！")
+        return None
+
+    # 1. 构造发给 AI 的提示词 (Prompt)
+    prompt = f"""
+    我是亚马逊运营。产品是 Makeup Mirror。
+    请分析搜索词："{term}"。
+    数据：花费 ${spend}, 点击 {clicks}, 订单 {orders}。
     
-    # 3. 格式化 (DeepSeek Jsonl)
-    data = {
-        "messages": [
-            {"role": "system", "content": "你是一个精通Amazon PPC的运营专家。"},
-            {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": assistant_reply}
-        ]
-    }
+    请输出一个 JSON 格式的回答，包含两个字段：
+    1. "reasoning": 详细的分析思考过程（先分析数据，再分析语义相关性，最后得出结论）。
+    2. "action": 建议操作（Negative Exact / Negative Phrase / Keep / Increase Bid）。
     
-    with open(DATA_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(data, ensure_ascii=False) + "\n")
-    
-    st.toast(f"✅ 已记入教材：{term} -> {action}")
+    我的预判倾向是：{user_intent} (请参考我的倾向，但如果有理有据可以反驳)
+    """
+
+    try:
+        # 2. 调用 API
+        with st.spinner(f"🧠 AI 正在深度分析 '{term}' ..."):
+            res = requests.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7, 
+                    "response_format": {"type": "json_object"} 
+                }
+            )
+            
+            if res.status_code == 200:
+                ai_content = res.json()['choices'][0]['message']['content']
+                ai_json = json.loads(ai_content)
+                
+                reasoning = ai_json.get("reasoning", "AI 未提供详情")
+                action = ai_json.get("action", "Unknown")
+
+                # 3. 构造成训练数据格式
+                train_data = {
+                    "messages": [
+                        {"role": "system", "content": "你是一个精通 Amazon PPC 的专家，你的回答必须包含深度的数据分析和逻辑推理。"},
+                        {"role": "user", "content": f"分析词: {term}, 花费: ${spend}, 点击: {clicks}, 订单: {orders}"},
+                        {"role": "assistant", "content": f"分析逻辑：{reasoning}\n\n建议操作：【{action}】"}
+                    ]
+                }
+
+                # 4. 保存文件
+                with open(DATA_FILE, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(train_data, ensure_ascii=False) + "\n")
+                
+                st.toast(f"✅ 已保存思考路径！\nAI 观点: {reasoning[:30]}...")
+                return reasoning
+            else:
+                st.error(f"API 报错: {res.text}")
+    except Exception as e:
+        st.error(f"网络错误: {e}")
 
 # === 3. 侧边栏 ===
-st.sidebar.title("🧠 控制台 v5.0")
-deepseek_key = st.sidebar.text_input("🔑 DeepSeek Key", type="password")
+st.sidebar.title("🧠 控制台 v5.1")
+
+# 🔥🔥🔥 你的 Key 已经预填在这里了 🔥🔥🔥
+default_key = "sk-55cc3f56742f4e43be099c9489e02911"
+deepseek_key = st.sidebar.text_input("🔑 DeepSeek Key", value=default_key, type="password")
+
 product_name = st.sidebar.text_input("📦 产品名称", value="Makeup Mirror")
 
 st.sidebar.markdown("---")
@@ -57,27 +102,23 @@ st.sidebar.markdown("---")
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         count = sum(1 for _ in f)
-    st.sidebar.metric("📚 已积累教材", f"{count} 条")
+    st.sidebar.metric("📚 已积累 CoT 教材", f"{count} 条")
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        st.sidebar.download_button("📥 下载训练数据", f, file_name="deepseek_finetune.jsonl")
+        st.sidebar.download_button("📥 下载带思考的数据", f, file_name="deepseek_cot_finetune.jsonl")
 else:
-    st.sidebar.info("暂无训练数据，快去'否词清洗'里点击按钮吧！")
+    st.sidebar.info("暂无数据，快去让 AI 思考吧！")
 
-st.sidebar.markdown("---")
-with st.sidebar.expander("⚙️ 阈值设置", expanded=False):
-    neg_spend_th = st.number_input("否词花费阈值", 5.0)
-    target_acos = st.slider("目标 ACoS", 0.1, 1.0, 0.3)
-
-# === 4. 主界面 & 数据加载 ===
-st.title("🧠 Amazon AI 指挥官 (v5.0 终极合体版)")
-st.caption("🚀 数据可视化 | 智能诊断 | **AI 模型训练 (数据积累中)**")
+# === 4. 主界面 ===
+st.title("🧠 Amazon AI 训练师 (v5.1 懒人版)")
+st.caption("🚀 内置 API Key | 点击按钮生成深度分析 | 自动积累高质量教材")
 
 c1, c2 = st.columns(2)
 with c1:
-    file_bulk = st.file_uploader("📂 Bulk 表格 (竞价/图表)", type=['xlsx', 'csv'], key="bulk")
+    file_bulk = st.file_uploader("📂 Bulk 表格 (图表)", type=['xlsx', 'csv'], key="bulk")
 with c2:
-    file_term = st.file_uploader("📂 Search Term (否词/训练)", type=['xlsx', 'csv'], key="term")
+    file_term = st.file_uploader("📂 Search Term (训练核心)", type=['xlsx', 'csv'], key="term")
 
+# 数据读取工具
 def load_data(file, ftype):
     if not file: return pd.DataFrame()
     try:
@@ -94,57 +135,16 @@ def load_data(file, ftype):
 
 df_bulk = load_data(file_bulk, 'bulk')
 df_term = load_data(file_term, 'term')
-
 if not df_bulk.empty: df_bulk.columns = df_bulk.columns.astype(str).str.strip()
 if not df_term.empty: df_term.columns = df_term.columns.astype(str).str.strip()
 
 # === 5. 功能区 ===
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📈 数据看板", 
-    "🧠 交互式清洗 (训练)", 
-    "💰 竞价优化", 
-    "🏆 黄金挖掘", 
-    "💫 关联分析"
-])
+tab1, tab2, tab3, tab4 = st.tabs(["🧠 AI 自动标注 (核心)", "📈 看板", "💰 竞价", "🏆 黄金词"])
 
-# 预处理
-if not df_bulk.empty:
-    bk_cols = {
-        'entity': next((c for c in df_bulk.columns if c in ["实体层级", "Record Type"]), None),
-        'kw': next((c for c in df_bulk.columns if c in ["关键词文本", "Keyword Text"]), None),
-        'bid': next((c for c in df_bulk.columns if c in ["竞价", "Keyword Bid"]), None),
-        'spend': next((c for c in df_bulk.columns if c in ["花费", "Spend"]), None),
-        'sales': next((c for c in df_bulk.columns if c in ["销量", "Sales"]), None),
-        'orders': next((c for c in df_bulk.columns if c in ["订单数量", "Orders"]), None),
-        'clicks': next((c for c in df_bulk.columns if c in ["点击量", "Clicks"]), None),
-    }
-    if bk_cols['entity'] and bk_cols['kw']:
-        df_kws = df_bulk[df_bulk[bk_cols['entity']].astype(str).str.contains('Keyword|关键词', case=False, na=False)].copy()
-        for c in [bk_cols['spend'], bk_cols['sales'], bk_cols['orders'], bk_cols['clicks'], bk_cols['bid']]:
-            if c: df_kws[c] = pd.to_numeric(df_kws[c], errors='coerce').fillna(0)
-        if bk_cols['spend'] and bk_cols['sales']:
-            df_kws['ACoS'] = df_kws.apply(lambda x: x[bk_cols['spend']]/x[bk_cols['sales']] if x[bk_cols['sales']]>0 else 0, axis=1)
-
-# --- Tab 1: 看板 (v4.2的功能) ---
+# --- Tab 1: AI 自动标注 (Core) ---
 with tab1:
-    st.subheader("📈 账户透视")
-    if not df_bulk.empty and 'df_kws' in locals():
-        t_spend = df_kws[bk_cols['spend']].sum()
-        t_sales = df_kws[bk_cols['sales']].sum()
-        m1, m2 = st.columns(2)
-        m1.metric("总花费", f"${t_spend:,.2f}")
-        m2.metric("总销售额", f"${t_sales:,.2f}")
-        
-        chart_data = df_kws[df_kws[bk_cols['spend']]>0].copy()
-        if not chart_data.empty:
-            st.scatter_chart(chart_data, x=bk_cols['spend'], y=bk_cols['sales'], size=bk_cols['clicks'], color='ACoS', height=400)
-            st.info("💡 **左上角**是金矿，**右下角**是垃圾。")
-    else: st.info("请上传 Bulk 表格。")
-
-# --- Tab 2: 交互式清洗 (v5.0 核心) ---
-with tab2:
-    st.subheader("🧠 交互式清洗 (一边干活，一边训练AI)")
-    st.markdown("👉 **你的每一次点击，都在教 DeepSeek 怎么做运营。**")
+    st.subheader("🧠 思维链 (CoT) 数据生产车间")
+    st.info("💡 现在不需要输 Key 了！直接点击下面的按钮，AI 就会开始工作。")
     
     if not df_term.empty:
         st_cols = {
@@ -158,57 +158,74 @@ with tab2:
             for c in [st_cols['spend'], st_cols['clicks'], st_cols['orders']]:
                 if c: df_term[c] = pd.to_numeric(df_term[c], errors='coerce').fillna(0)
             
-            # 筛选出 0订单 且 有花费 的词 (最需要判断的词)
+            # 筛选：0订单 & 有花费
             mask = (df_term[st_cols['orders']] == 0) & (df_term[st_cols['spend']] > 0)
             review_df = df_term[mask].sort_values(by=st_cols['spend'], ascending=False).head(20)
             
             if not review_df.empty:
                 for index, row in review_df.iterrows():
                     with st.expander(f"📝 {row[st_cols['term']]} (花费: ${row[st_cols['spend']]:.2f})", expanded=True):
-                        c1, c2, c3, c4 = st.columns(4)
+                        col1, col2, col3 = st.columns([1, 1, 3])
+                        
                         term = row[st_cols['term']]
                         sp = row[st_cols['spend']]
                         cl = row[st_cols['clicks']]
                         od = row[st_cols['orders']]
                         
-                        # 按钮区 - 点击即保存
-                        with c1:
-                            if st.button("❌ 否定 (精准)", key=f"nex_{index}"):
-                                save_training_example(term, sp, cl, od, "Negative Exact", "高花费0转化，词义不符")
-                        with c2:
-                            if st.button("🚫 否定 (词组)", key=f"nph_{index}"):
-                                save_training_example(term, sp, cl, od, "Negative Phrase", "完全不相关流量")
-                        with c3:
-                            if st.button("👀 再观察一下", key=f"wait_{index}"):
-                                save_training_example(term, sp, cl, od, "Keep", "数据量还不够，暂不处理")
-                        with c4:
-                            if st.button("🤖 AI 怎么看?", key=f"ask_{index}"):
-                                if deepseek_key:
-                                    prompt = f"分析词'{term}'，花费{sp}，点击{cl}，0单。是不是不相关？"
-                                    try:
-                                        res = requests.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {deepseek_key}"}, json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]})
-                                        st.info(res.json()['choices'][0]['message']['content'])
-                                    except: st.error("网络/Key错误")
-                                else: st.warning("请填Key")
-            else: st.success("🎉 太棒了！没有发现明显的浪费词。")
-        else: st.error("缺少必要列")
-    else: st.info("请上传 Search Term 表格")
+                        # 按钮逻辑：你给个大方向，AI 负责写详细逻辑
+                        with col1:
+                            if st.button("❌ 生成‘否定’逻辑", key=f"gen_neg_{index}", type="primary"):
+                                reason = generate_and_save_ai_thought(deepseek_key, term, sp, cl, od, "Negative")
+                                if reason: st.success(f"已存逻辑: {reason}")
+                        
+                        with col2:
+                            if st.button("✨ 生成‘保留’逻辑", key=f"gen_keep_{index}"):
+                                reason = generate_and_save_ai_thought(deepseek_key, term, sp, cl, od, "Keep")
+                                if reason: st.success(f"已存逻辑: {reason}")
+                                
+                        with col3:
+                            st.caption("👈 点击按钮，DeepSeek 就会帮你写出分析过程，并存入后台。")
 
-# --- Tab 3/4/5: 其他功能 (保留 v4.2) ---
+            else: st.success("没有发现明显的浪费词。")
+        else: st.error("缺少必要列")
+    else: st.info("请先上传 Search Term 表格")
+
+# --- Tab 2: 看板 ---
+with tab2:
+    st.subheader("📈 账户透视")
+    if not df_bulk.empty and 'df_kws' in locals():
+        # 预处理 Bulk
+        bk_cols = {
+            'entity': next((c for c in df_bulk.columns if c in ["实体层级", "Record Type"]), None),
+            'kw': next((c for c in df_bulk.columns if c in ["关键词文本", "Keyword Text"]), None),
+            'bid': next((c for c in df_bulk.columns if c in ["竞价", "Keyword Bid"]), None),
+            'spend': next((c for c in df_bulk.columns if c in ["花费", "Spend"]), None),
+            'sales': next((c for c in df_bulk.columns if c in ["销量", "Sales"]), None),
+            'orders': next((c for c in df_bulk.columns if c in ["订单数量", "Orders"]), None),
+            'clicks': next((c for c in df_bulk.columns if c in ["点击量", "Clicks"]), None),
+        }
+        if bk_cols['entity'] and bk_cols['kw']:
+            df_kws = df_bulk[df_bulk[bk_cols['entity']].astype(str).str.contains('Keyword|关键词', case=False, na=False)].copy()
+            for c in [bk_cols['spend'], bk_cols['sales'], bk_cols['orders'], bk_cols['clicks'], bk_cols['bid']]:
+                if c: df_kws[c] = pd.to_numeric(df_kws[c], errors='coerce').fillna(0)
+            if bk_cols['spend'] and bk_cols['sales']:
+                df_kws['ACoS'] = df_kws.apply(lambda x: x[bk_cols['spend']]/x[bk_cols['sales']] if x[bk_cols['sales']]>0 else 0, axis=1)
+
+            st.scatter_chart(df_kws[df_kws[bk_cols['spend']]>0], x=bk_cols['spend'], y=bk_cols['sales'], size=bk_cols['clicks'], color='ACoS', height=400)
+    else: st.info("请上传 Bulk 表格。")
+
+# --- Tab 3/4 ---
 with tab3:
     st.subheader("📉 竞价优化")
     if not df_bulk.empty and 'df_kws' in locals():
+        target_acos = 0.3 # 默认值
         bad = df_kws[(df_kws[bk_cols['orders']]>0) & (df_kws['ACoS']>target_acos)].head(20)
         if not bad.empty: st.dataframe(bad[[bk_cols['kw'], 'ACoS', bk_cols['spend']]], use_container_width=True)
-        else: st.success("竞价健康")
+    else: st.info("请上传 Bulk 表格")
 
 with tab4:
     st.subheader("🏆 黄金挖掘")
     if not df_bulk.empty and 'df_kws' in locals():
         gold = df_kws[(df_kws[bk_cols['orders']]>=2) & (df_kws['ACoS']<0.2)].head(20)
         if not gold.empty: st.dataframe(gold[[bk_cols['kw'], 'ACoS', bk_cols['sales']]], use_container_width=True)
-        else: st.info("无黄金词")
-
-with tab5:
-    st.subheader("💫 关联分析")
-    st.info("这里是光环效应分析区 (同 v4.2)")
+    else: st.info("请上传 Bulk 表格")
