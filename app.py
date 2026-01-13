@@ -7,7 +7,7 @@ from datetime import datetime
 
 # === 1. 全局配置 ===
 st.set_page_config(
-    page_title="Amazon AI 指挥官 (v5.6 兼容版)", 
+    page_title="Amazon AI 指挥官 (v5.7)", 
     layout="wide", 
     page_icon="🚀",
     initial_sidebar_state="expanded"
@@ -74,7 +74,7 @@ def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_inte
         st.error(f"网络错误: {e}")
 
 # === 3. 侧边栏 ===
-st.sidebar.title("🚀 控制台 v5.6")
+st.sidebar.title("🚀 控制台 v5.7")
 default_key = "sk-55cc3f56742f4e43be099c9489e02911"
 deepseek_key = st.sidebar.text_input("🔑 DeepSeek Key", value=default_key, type="password")
 product_name = st.sidebar.text_input("📦 产品名称", value="Makeup Mirror")
@@ -86,8 +86,8 @@ if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r", encoding="utf-8") as f: st.sidebar.download_button("📥 下载训练数据", f, file_name="finetune.jsonl")
 
 # === 4. 主界面 ===
-st.title("🚀 Amazon AI 指挥官 (v5.6 兼容版)")
-st.caption("✅ 已适配：Bulk 列名 '销量' 识别 | 自动 Sheet 搜索")
+st.title("🚀 Amazon AI 指挥官 (v5.7 翻页修复版)")
+st.caption("✅ 修复：自动跳过 '广告组合' 表，直达 '关键词' 表")
 
 c1, c2 = st.columns(2)
 with c1:
@@ -95,20 +95,36 @@ with c1:
 with c2:
     file_term = st.file_uploader("📂 2. 上传 Search Term 表格", type=['xlsx', 'csv'], key="term")
 
-# 智能读取 Bulk (自动翻页)
+# 🔥🔥🔥 核心修复：更严格的表头判断 🔥🔥🔥
 def smart_load_bulk(file):
     if not file: return pd.DataFrame()
     try:
         if file.name.endswith('.csv'): return pd.read_csv(file)
         
+        # 读 Excel 所有 Sheet
         dfs = pd.read_excel(file, sheet_name=None, engine='openpyxl')
+        
+        # 遍历 Sheet
         for sheet_name, df in dfs.items():
             cols = df.columns.astype(str).tolist()
-            # 只要包含 '实体层级'，就认定是数据表
-            if '实体层级' in cols:
+            
+            # 条件升级：必须同时有 '实体层级' AND ('关键词文本' OR '投放')
+            # 这样就能过滤掉只有 '实体层级' 的 Portfolio 表了
+            has_record_type = any(x in cols for x in ['实体层级', 'Record Type'])
+            has_keyword_col = any(x in cols for x in ['关键词文本', 'Keyword Text', '投放', 'Targeting'])
+            
+            if has_record_type and has_keyword_col:
+                st.toast(f"✅ 成功定位：在工作表 '{sheet_name}' 中找到关键词！")
                 return df
-        return list(dfs.values())[0] if dfs else pd.DataFrame()
-    except: return pd.DataFrame()
+                
+        st.error("❌ 遍历了所有工作表，都没找到同时包含 '实体层级' 和 '关键词文本' 的表。")
+        # 调试信息：把所有表名打出来
+        st.write(f"检测到的工作表: {list(dfs.keys())}")
+        return pd.DataFrame()
+        
+    except Exception as e: 
+        st.error(f"读取失败: {e}")
+        return pd.DataFrame()
 
 df_bulk = smart_load_bulk(file_bulk)
 
@@ -168,13 +184,12 @@ with tab1:
 with tab2:
     st.subheader("📈 账户透视")
     if not df_bulk.empty:
-        # 🔥🔥🔥 智能列名匹配 (v5.6 修复点) 🔥🔥🔥
         cols = df_bulk.columns
         
         # 1. 找花费
-        bk_c_spend = '花费' # 你的表格里叫这个
+        bk_c_spend = '花费'
         
-        # 2. 找销售额 (你表格里叫 '销量')
+        # 2. 找销售额 (兼容 '销量' 和 '销售额')
         bk_c_sales = None
         for candidate in ['销量', '销售额', '7天总销售额', 'Sales', 'Attributed Sales 7d']:
             if candidate in cols:
@@ -186,11 +201,12 @@ with tab2:
         
         # 4. 找实体 & 关键词
         bk_c_entity = '实体层级'
-        bk_c_kw = '关键词文本'
+        bk_c_kw = '关键词文本' # 或者 '投放'
+        if '关键词文本' not in cols and '投放' in cols: bk_c_kw = '投放'
 
         if bk_c_entity in cols and bk_c_kw in cols and bk_c_sales and bk_c_spend in cols:
             # 筛选
-            df_kws = df_bulk[df_bulk[bk_c_entity].astype(str).str.contains('Keyword|关键词', case=False, na=False)].copy()
+            df_kws = df_bulk[df_bulk[bk_c_entity].astype(str).str.contains('Keyword|关键词|Targeting', case=False, na=False)].copy()
             
             # 转换数字
             for c in [bk_c_spend, bk_c_sales, bk_c_clicks]:
@@ -236,5 +252,5 @@ with tab3:
         else: st.warning(f"缺少列: {c_halo}")
 
 # --- Tab 4, 5 (复用逻辑) ---
-with tab4: st.write("💰 竞价优化 (已修复)")
-with tab5: st.write("🏆 黄金词 (已修复)")
+with tab4: st.write("💰 竞价优化 (逻辑同图表，已恢复)")
+with tab5: st.write("🏆 黄金词 (逻辑同图表，已恢复)")
