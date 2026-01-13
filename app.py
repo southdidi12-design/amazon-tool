@@ -5,29 +5,29 @@ import json
 import os
 from datetime import datetime
 
-# === 1. 全局配置 (改个图标确保你能看出区别) ===
+# === 1. 全局配置 ===
 st.set_page_config(
-    page_title="Amazon AI (v5.13 最终版)", 
+    page_title="Amazon AI 指挥官 (v5.14 完全体)", 
     layout="wide", 
-    page_icon="🔥", # 换成火
+    page_icon="💎",
     initial_sidebar_state="expanded"
 )
 
 st.markdown("""
 <style>
-    .main { background-color: #fff5f5; } /* 微微泛红的背景，证明是新版 */
+    .main { background-color: #f8f9fa; }
     div[data-testid="stMetric"] { background-color: white; border: 1px solid #ddd; padding: 10px; border-radius: 8px; }
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stButton>button { width: 100%; border-radius: 4px; }
     .ai-thought { background-color: #fff; padding: 10px; border: 1px solid #eee; border-radius: 5px; font-size: 13px; margin-top: 5px;}
     
-    /* 重点：ASIN 链接样式 */
+    /* ASIN 链接样式 */
     .asin-link { 
-        font-size: 16px; 
-        color: #d93025; /* 红色链接 */
+        font-size: 15px; 
+        color: #d93025; 
         font-weight: bold; 
         text-decoration: none;
-        padding: 5px 0;
+        padding-bottom: 5px;
         display: block;
     }
 </style>
@@ -75,27 +75,33 @@ def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_inte
                 return ai_json.get('reasoning')
     except: return None
 
-# === 3. 侧边栏 ===
-st.sidebar.title("🔥 v5.13 验证版") # 标题改了
+# === 3. 侧边栏 (这里把设置装回来了！) ===
+st.sidebar.title("💎 控制台 v5.14")
 default_key = "sk-55cc3f56742f4e43be099c9489e02911"
 deepseek_key = st.sidebar.text_input("🔑 DeepSeek Key", value=default_key, type="password")
 product_name = st.sidebar.text_input("📦 产品名称", value="Makeup Mirror")
 
 st.sidebar.markdown("---")
+# 🔥🔥🔥 你的设置滑块回来了 🔥🔥🔥
+with st.sidebar.expander("⚙️ 规则设置 (影响竞价/黄金词)", expanded=True):
+    target_acos = st.slider("🎯 目标 ACoS", 0.1, 1.0, 0.3, help="高于这个值的词会被建议降价")
+    gold_acos = st.slider("🏆 黄金词 ACoS 上限", 0.1, 1.0, 0.2, help="低于这个值的词被视为黄金词")
+
+st.sidebar.markdown("---")
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r", encoding="utf-8") as f: count = sum(1 for _ in f)
-    st.sidebar.metric("📚 数据量", f"{count} 条")
-    with open(DATA_FILE, "r", encoding="utf-8") as f: st.sidebar.download_button("📥 下载", f, file_name="finetune.jsonl")
+    st.sidebar.metric("📚 训练数据", f"{count} 条")
+    with open(DATA_FILE, "r", encoding="utf-8") as f: st.sidebar.download_button("📥 下载文件", f, file_name="finetune.jsonl")
 
 # === 4. 主界面 ===
-st.title("🔥 Amazon AI 指挥官 (v5.13 强制刷新版)")
-st.caption("🔴 如果背景不是微微泛红，说明你的网页没更新！请点右下角 Manage app -> Reboot app")
+st.title("💎 Amazon AI 指挥官 (v5.14 完全体)")
+st.caption("✅ 左侧规则设置已恢复 | ASIN 跳转已就绪 | CPC 数据已显示")
 
 c1, c2 = st.columns(2)
 with c1:
-    file_bulk = st.file_uploader("📂 1. Bulk", type=['xlsx', 'csv'], key="bulk")
+    file_bulk = st.file_uploader("📂 1. Bulk 表格", type=['xlsx', 'csv'], key="bulk")
 with c2:
-    file_term = st.file_uploader("📂 2. Search Term", type=['xlsx', 'csv'], key="term")
+    file_term = st.file_uploader("📂 2. Search Term 表格", type=['xlsx', 'csv'], key="term")
 
 # 读取逻辑
 def smart_load_bulk(file):
@@ -106,7 +112,7 @@ def smart_load_bulk(file):
         for sheet_name, df in dfs.items():
             cols = df.columns.astype(str).tolist()
             if any(x in cols for x in ['实体层级', 'Record Type']) and any(x in cols for x in ['关键词文本', 'Keyword Text', '投放']):
-                st.toast(f"✅ Bulk OK: {sheet_name}")
+                st.toast(f"✅ Bulk 就绪: {sheet_name}")
                 return df
         return pd.DataFrame()
     except: return pd.DataFrame()
@@ -149,19 +155,18 @@ if not df_bulk.empty:
 
 # === 5. 功能标签页 ===
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "⚡ 透视清洗 (New)", "📈 看板", "💰 竞价", "🏆 黄金", "💫 关联"
+    "⚡ 透视清洗", "📈 看板", "💰 竞价", "🏆 黄金", "💫 关联"
 ])
 
-# --- Tab 1: 快速清洗 (透视版) ---
+# --- Tab 1: 快速清洗 ---
 with tab1:
-    st.subheader("⚡ 快速清洗 (透视版 v5.13)")
+    st.subheader("⚡ 快速清洗 (ASIN 透视版)")
     
     if not df_term.empty:
-        # 强制使用你提供的列名
         c_term = '客户搜索词'
         c_spend = '花费'
         c_orders = '7天总订单数(#)'
-        c_clicks = '点击量' # 确保你的表里有这一列
+        c_clicks = '点击量'
         
         if c_term in df_term.columns:
             df_term[c_spend] = pd.to_numeric(df_term[c_spend], errors='coerce').fillna(0)
@@ -173,19 +178,17 @@ with tab1:
             
             if not review_df.empty:
                 for idx, row in review_df.iterrows():
-                    # 🔥🔥🔥 这里是新的显示逻辑 🔥🔥🔥
                     term_val = str(row[c_term])
                     spend_val = row[c_spend]
                     clicks_val = row[c_clicks]
                     cpc_val = spend_val / clicks_val if clicks_val > 0 else 0
                     
-                    # 标题里必须有 | 竖线，且有 CPC
                     label = f"📝 {term_val} | 💸 ${spend_val:.2f} | 🖱️ {int(clicks_val)}次 | CPC ${cpc_val:.2f}"
                     
                     with st.expander(label, expanded=True):
-                        # 🔥 ASIN 链接
+                        # ASIN 跳转
                         if term_val.lower().startswith("b0"):
-                            st.markdown(f"🔗 <a href='https://www.amazon.com/dp/{term_val}' target='_blank' class='asin-link'>👉 点击跳转到亚马逊: {term_val}</a>", unsafe_allow_html=True)
+                            st.markdown(f"🔗 <a href='https://www.amazon.com/dp/{term_val}' target='_blank' class='asin-link'>👉 点击去亚马逊看一眼: {term_val}</a>", unsafe_allow_html=True)
                         
                         c1, c2, c3 = st.columns([1, 1, 3])
                         with c1:
@@ -200,16 +203,48 @@ with tab1:
                                 if reasoning: st.session_state[f"ai_{idx}"] = reasoning
                             if f"ai_{idx}" in st.session_state:
                                 st.markdown(f"""<div class="ai-thought">{st.session_state[f"ai_{idx}"]}</div>""", unsafe_allow_html=True)
-            else: st.success("无高费0单词")
+            else: st.success("没有发现高花费0转化的词。")
     else: st.info("请上传 Search Term")
 
-# --- Tab 2-5 (略，复用) ---
+# --- Tab 2: 看板 ---
 with tab2:
+    st.subheader("📈 账户透视")
     if bulk_ready:
         st.scatter_chart(df_kws[df_kws[bk_cols['spend']]>0], x=bk_cols['spend'], y=bk_cols['sales'], size=bk_cols['clicks'], color='ACoS')
-    else: st.info("Wait for Bulk")
+    else: st.info("请上传 Bulk 表格")
 
+# --- Tab 3: 竞价 (使用左侧设置的 target_acos) ---
 with tab3:
+    st.subheader(f"💰 竞价优化 (目标 ACoS: {target_acos*100}%)")
     if bulk_ready:
-        bad = df_kws[(df_kws[bk_cols['orders']]>0) & (df_kws['ACoS']>0.3)].head(20)
-        if not bad.empty: st.dataframe(bad, use_container_width=True)
+        # 筛选 ACoS > 左侧设置值
+        bad = df_kws[(df_kws[bk_cols['orders']] > 0) & (df_kws['ACoS'] > target_acos)].sort_values(by='ACoS', ascending=False).head(50)
+        
+        if not bad.empty:
+            show_df = bad[[bk_cols['kw'], bk_cols['bid'], 'ACoS', bk_cols['spend'], bk_cols['sales']]].copy()
+            show_df['建议竞价'] = show_df[bk_cols['bid']] * 0.8
+            st.dataframe(show_df, column_config={"ACoS": st.column_config.ProgressColumn(format="%.2f", max_value=2)}, use_container_width=True)
+        else: st.success(f"太棒了！所有出单词的 ACoS 都低于 {target_acos*100}%。")
+    else: st.info("请上传 Bulk 表格")
+
+# --- Tab 4: 黄金词 (使用左侧设置的 gold_acos) ---
+with tab4:
+    st.subheader(f"🏆 黄金词挖掘 (ACoS < {gold_acos*100}%)")
+    if bulk_ready:
+        gold_df = df_kws[(df_kws[bk_cols['orders']] >= 2) & (df_kws['ACoS'] > 0) & (df_kws['ACoS'] < gold_acos)].sort_values(by=bk_cols['sales'], ascending=False).head(50)
+        if not gold_df.empty:
+            show_df = gold_df[[bk_cols['kw'], bk_cols['bid'], 'ACoS', bk_cols['sales']]].copy()
+            show_df['建议竞价'] = show_df[bk_cols['bid']] * 1.2
+            st.dataframe(show_df, column_config={"ACoS": st.column_config.ProgressColumn(format="%.2f", max_value=0.5)}, use_container_width=True)
+        else: st.info(f"暂无黄金词，试着在左侧调高一点阈值？")
+    else: st.info("请上传 Bulk 表格")
+
+# --- Tab 5: 关联 ---
+with tab5:
+    st.subheader("💫 关联分析")
+    if not df_term.empty:
+        c_halo = '7天内其他SKU销售量(#)'
+        if c_halo in df_term.columns:
+            df_term[c_halo] = pd.to_numeric(df_term[c_halo], errors='coerce').fillna(0)
+            halo = df_term[df_term[c_halo]>0].sort_values(by=c_halo, ascending=False).head(20)
+            if not halo.empty: st.dataframe(halo[['客户搜索词', c_halo, '花费']], use_container_width=True)
