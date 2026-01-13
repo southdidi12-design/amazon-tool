@@ -7,9 +7,9 @@ from datetime import datetime
 
 # === 1. 全局配置 ===
 st.set_page_config(
-    page_title="Amazon AI 指挥官 (v5.9 深度版)", 
+    page_title="Amazon AI 指挥官 (v5.10 硬核版)", 
     layout="wide", 
-    page_icon="🧠",
+    page_icon="⚡",
     initial_sidebar_state="expanded"
 )
 
@@ -19,11 +19,21 @@ st.markdown("""
     div[data-testid="stMetric"] { background-color: white; border: 1px solid #ddd; padding: 10px; border-radius: 8px; }
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stButton>button { width: 100%; border-radius: 4px; }
-    .ai-thought { background-color: #e8f0fe; padding: 15px; border-radius: 8px; border-left: 5px solid #1a73e8; margin-top: 10px; font-size: 14px; }
+    /* 极简风 AI 回复框 */
+    .ai-thought { 
+        background-color: #f1f3f4; 
+        padding: 15px; 
+        border-radius: 5px; 
+        border-left: 5px solid #5f6368; 
+        margin-top: 10px; 
+        font-family: 'Consolas', 'Courier New', monospace; /* 程序员/数据风格字体 */
+        font-size: 13px; 
+        white-space: pre-wrap; /* 保持换行 */
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# === 2. 核心：AI 深度思考生成器 (Prompt 升级) ===
+# === 2. 核心：AI 逻辑生成器 (Prompt 大改) ===
 DATA_FILE = "deepseek_cot_data.jsonl"
 
 def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_intent):
@@ -31,39 +41,39 @@ def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_inte
         st.error("❌ 需要 API Key")
         return None
     
-    # 🔥🔥🔥 核心升级：超级详细的 Prompt 🔥🔥🔥
+    # 自动计算 CPC
+    cpc = spend / clicks if clicks > 0 else 0
+    
+    # 🔥🔥🔥 Prompt: 硬核数据风 🔥🔥🔥
     prompt = f"""
-    【角色设定】
-    你是一名拥有 10 年经验的亚马逊 PPC 广告专家。你的产品是 "Makeup Mirror" (化妆镜)。
+    你是一个冷酷的亚马逊广告数据分析师。
+    产品: Makeup Mirror。
+    对象: "{term}"。
     
-    【任务目标】
-    请分析搜索词："{term}"。
-    当前数据表现：花费 ${spend}, 点击 {clicks}, 订单 {orders}。
+    请输出 JSON，包含 "reasoning" 和 "action"。
     
-    【分析框架 (必须严格执行)】
-    请不要只看数据，必须结合语义进行深度推理。请按以下步骤思考：
-    1. **用户意图 (User Intent)**: 搜索这个词的用户，他心里想要买什么？是想买镜子，还是配件，还是完全不相关的东西？
-    2. **相关性 (Relevance)**: 这个词与我的产品（化妆镜）匹配度如何？是精准、宽泛、还是互补？
-    3. **数据诊断 (Data Check)**: 当前的花费和点击量是否已经达到“统计学显著”？CPC 是否过高？
-    4. **决策逻辑 (Verdict)**: 综合以上三点，为什么你建议执行该操作？
+    【reasoning 格式要求】
+    第一行必须是数据汇总，格式如下：
+    [数据] 花费:${spend} | 点击:{clicks} | CPC:${cpc:.2f} | 订单:{orders}
     
-    【输出要求】
-    请输出 JSON 格式：
-    - "reasoning": 一段 100-200 字的详细分析，语气要专业、犀利。
-    - "action": 建议操作 (Negative Exact / Negative Phrase / Keep / Increase Bid)。
+    第二行开始直接写判断逻辑（不要废话，不要写"用户意图是..."这种废话）。
+    逻辑要短促有力：
+    1. CPC 是否过高？
+    2. 是否达到统计显著性（点击>20无单）？
+    3. 结论。
     
-    我的预判是：{user_intent} (仅供参考，请以你的专家视角为准)。
+    我的倾向: {user_intent}。
     """
 
     try:
-        with st.spinner(f"🧠 AI 正在深度剖析 '{term}' (这可能需要几秒钟)..."):
+        with st.spinner(f"⚡ 正在计算 '{term}' ..."):
             res = requests.post(
                 "https://api.deepseek.com/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={
                     "model": "deepseek-chat",
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.8, # 稍微提高创造力，让分析更丰富
+                    "temperature": 0.5, # 降低温度，让它更冷静、客观
                     "response_format": {"type": "json_object"} 
                 }
             )
@@ -71,25 +81,23 @@ def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_inte
                 content = res.json()['choices'][0]['message']['content']
                 ai_json = json.loads(content)
                 
-                # 保存高质量训练数据
+                # 保存训练数据
                 train_data = {
                     "messages": [
-                        {"role": "system", "content": "你是一个精通 Amazon PPC 的专家，擅长通过用户意图和数据进行深度归因分析。"},
-                        {"role": "user", "content": f"请分析搜索词: {term}\n数据: 花费 ${spend}, 点击 {clicks}, 订单 {orders}"},
-                        {"role": "assistant", "content": f"【深度分析】\n{ai_json.get('reasoning')}\n\n【建议操作】\n{ai_json.get('action')}"}
+                        {"role": "system", "content": "PPC数据分析师"},
+                        {"role": "user", "content": f"词:{term}, 费:{spend}, 单:{orders}"},
+                        {"role": "assistant", "content": f"{ai_json.get('reasoning')}\n-> 操作: {ai_json.get('action')}"}
                     ]
                 }
                 with open(DATA_FILE, "a", encoding="utf-8") as f:
                     f.write(json.dumps(train_data, ensure_ascii=False) + "\n")
                 
                 return ai_json.get('reasoning')
-            else:
-                st.error(f"API 报错: {res.text}")
     except Exception as e:
         st.error(f"网络错误: {e}")
 
 # === 3. 侧边栏 ===
-st.sidebar.title("🧠 控制台 v5.9")
+st.sidebar.title("⚡ 控制台 v5.10")
 default_key = "sk-55cc3f56742f4e43be099c9489e02911"
 deepseek_key = st.sidebar.text_input("🔑 DeepSeek Key", value=default_key, type="password")
 product_name = st.sidebar.text_input("📦 产品名称", value="Makeup Mirror")
@@ -102,12 +110,12 @@ with st.sidebar.expander("⚙️ 规则设置", expanded=True):
 
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r", encoding="utf-8") as f: count = sum(1 for _ in f)
-    st.sidebar.metric("📚 已积累深度教材", f"{count} 条")
-    with open(DATA_FILE, "r", encoding="utf-8") as f: st.sidebar.download_button("📥 下载训练数据", f, file_name="finetune_deep.jsonl")
+    st.sidebar.metric("📚 已积累教材", f"{count} 条")
+    with open(DATA_FILE, "r", encoding="utf-8") as f: st.sidebar.download_button("📥 下载训练数据", f, file_name="finetune_hardcore.jsonl")
 
 # === 4. 主界面 ===
-st.title("🧠 Amazon AI 指挥官 (v5.9 深度思考版)")
-st.caption("🚀 升级 Prompt：强制 AI 进行【意图分析 + 语义匹配 + 数据诊断】的三维分析")
+st.title("⚡ Amazon AI 指挥官 (v5.10 硬核数据版)")
+st.caption("🚀 去除废话 | 强制展示 CPC/花费/点击 | 运营老鸟专用风格")
 
 c1, c2 = st.columns(2)
 with c1:
@@ -170,13 +178,12 @@ if not df_bulk.empty:
 
 # === 5. 功能标签页 ===
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🧠 AI 深度训练", "📈 数据看板", "💰 竞价优化", "🏆 黄金词", "💫 关联分析"
+    "🧠 AI 训练", "📈 数据看板", "💰 竞价优化", "🏆 黄金词", "💫 关联分析"
 ])
 
-# --- Tab 1: AI 训练 (界面优化) ---
+# --- Tab 1: AI 训练 (硬核版) ---
 with tab1:
-    st.subheader("🧠 AI 自动标注 (生成专家级教材)")
-    st.info("💡 现在的分析会包含：用户意图、语义相关性、数据统计显著性分析。")
+    st.subheader("🧠 AI 自动标注 (硬核风格)")
     
     if not df_term.empty:
         c_term = '客户搜索词'
@@ -194,38 +201,31 @@ with tab1:
             
             if not review_df.empty:
                 for idx, row in review_df.iterrows():
-                    with st.expander(f"📝 {row[c_term]} (花费: ${row[c_spend]:.2f})", expanded=True):
+                    with st.expander(f"📝 {row[c_term]} (Cost: ${row[c_spend]:.2f})", expanded=True):
                         c1, c2 = st.columns([1, 4])
                         
                         with c1:
-                            st.write("#### 你的决定：")
-                            if st.button("❌ 否定 (生成分析)", key=f"n_{idx}", type="primary"):
+                            st.write("#### 决策：")
+                            # 按钮直接触发
+                            if st.button("❌ 否定", key=f"n_{idx}", type="primary"):
                                 reasoning = generate_and_save_ai_thought(deepseek_key, row[c_term], row[c_spend], row[c_clicks], 0, "Negative")
-                                if reasoning:
-                                    st.session_state[f"reason_{idx}"] = reasoning
+                                if reasoning: st.session_state[f"reason_{idx}"] = reasoning
                             
-                            st.write("") # Spacer
-                            if st.button("👀 观察 (生成分析)", key=f"k_{idx}"):
+                            st.write("")
+                            if st.button("👀 观察", key=f"k_{idx}"):
                                 reasoning = generate_and_save_ai_thought(deepseek_key, row[c_term], row[c_spend], row[c_clicks], 0, "Keep")
-                                if reasoning:
-                                    st.session_state[f"reason_{idx}"] = reasoning
+                                if reasoning: st.session_state[f"reason_{idx}"] = reasoning
                         
                         with c2:
-                            # 动态显示 AI 的思考结果
                             if f"reason_{idx}" in st.session_state:
-                                st.markdown(f"""
-                                <div class="ai-thought">
-                                    <b>🤖 AI 深度分析报告：</b><br>
-                                    {st.session_state[f"reason_{idx}"]}
-                                </div>
-                                """, unsafe_allow_html=True)
+                                # 显示纯文本，不加花里胡哨的装饰
+                                st.markdown(f"""<div class="ai-thought">{st.session_state[f"reason_{idx}"]}</div>""", unsafe_allow_html=True)
                             else:
-                                st.caption("👈 点击左侧按钮，让 AI 生成深度分析报告...")
-                                
+                                st.caption("waiting for input...")
             else: st.success("没有发现高花费0转化的词。")
     else: st.info("请上传 Search Term 表格")
 
-# --- Tab 2: 看板 ---
+# --- Tab 2-5 (保持不变) ---
 with tab2:
     st.subheader("📈 账户透视")
     if bulk_ready:
@@ -234,12 +234,10 @@ with tab2:
         m1, m2 = st.columns(2)
         m1.metric("总花费", f"${t_spend:,.2f}")
         m2.metric("总销售额", f"${t_sales:,.2f}")
-        
         chart_data = df_kws[df_kws[bk_cols['spend']]>0]
         st.scatter_chart(chart_data, x=bk_cols['spend'], y=bk_cols['sales'], size=bk_cols['clicks'], color='ACoS')
     else: st.info("等待 Bulk 数据...")
 
-# --- Tab 3: 竞价 ---
 with tab3:
     st.subheader("💰 竞价优化")
     if bulk_ready:
@@ -251,7 +249,6 @@ with tab3:
         else: st.success("竞价健康")
     else: st.info("等待 Bulk 数据")
 
-# --- Tab 4: 黄金词 ---
 with tab4:
     st.subheader("🏆 黄金词")
     if bulk_ready:
@@ -263,7 +260,6 @@ with tab4:
         else: st.info("暂无黄金词")
     else: st.info("等待 Bulk 数据")
 
-# --- Tab 5: 关联 ---
 with tab5:
     st.subheader("💫 关联分析")
     if not df_term.empty:
