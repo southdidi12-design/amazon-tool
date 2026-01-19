@@ -6,210 +6,205 @@ import os
 import json
 from datetime import datetime, timedelta
 
-# === 🌟 HNV Amazon CFO - V6.2 (耐心等待版) ===
-VERSION = "V6.2 (增加等待时间)"
+# === 🌟 HNV Amazon CFO - V8.0 (AI 参谋版) ===
+VERSION = "V8.0 (AI 决策大脑)"
 
 st.set_page_config(layout="wide", page_title=f"HNV Amazon {VERSION}")
-st.title(f"🚀 HNV Amazon 广告指挥中心 - {VERSION}")
+st.title(f"🧠 HNV Amazon AI 广告投手 - {VERSION}")
 
-# === 0. 自动创建数据文件夹 ===
-if not os.path.exists('reports'):
-    os.makedirs('reports')
+# === 0. 基础设置 ===
+if not os.path.exists('reports'): os.makedirs('reports')
 
-# === 1. 侧边栏：设置区域 ===
-st.sidebar.header("⚙️ 系统设置")
-region_name = st.sidebar.selectbox(
-    "请选择店铺所在区域:",
-    ["北美 (美国/加拿大/墨西哥)", "欧洲 (英/德/法/意/西)", "远东 (日本/澳洲/新加坡)"]
-)
+# === 1. 侧边栏：策略与区域 ===
+st.sidebar.header("🌍 1. 店铺区域")
+region_name = st.sidebar.selectbox("选择区域:", ["北美 (美国/加拿大/墨西哥)", "欧洲", "远东"])
 
-if "北美" in region_name:
-    API_HOST = "https://advertising-api.amazon.com"
-elif "欧洲" in region_name:
-    API_HOST = "https://advertising-api-eu.amazon.com"
-elif "远东" in region_name:
-    API_HOST = "https://advertising-api-fe.amazon.com"
+if "北美" in region_name: API_HOST = "https://advertising-api.amazon.com"
+elif "欧洲" in region_name: API_HOST = "https://advertising-api-eu.amazon.com"
+elif "远东" in region_name: API_HOST = "https://advertising-api-fe.amazon.com"
 
-st.sidebar.info(f"当前连接: {API_HOST} (V3 API)")
+st.sidebar.markdown("---")
+st.sidebar.header("🤖 2. AI 投放策略设置")
 
-# === 2. 读取配置 ===
+# === 用户设定的目标 ===
+TARGET_ACOS = st.sidebar.slider("🎯 目标 ACOS (%)", 5, 100, 30) / 100
+MAX_SPEND_NO_SALE = st.sidebar.number_input("💸 0出单最大容忍花费 ($)", value=10.0, step=1.0)
+BID_AGGRESSIVENESS = st.sidebar.selectbox("🚀 调价激进程度", ["保守 (每次调5%)", "稳健 (每次调10%)", "激进 (每次调20%)"])
+
+# 确定调价幅度
+if "保守" in BID_AGGRESSIVENESS: ADJ_RATE = 0.05
+elif "稳健" in BID_AGGRESSIVENESS: ADJ_RATE = 0.10
+else: ADJ_RATE = 0.20
+
+# === 2. 配置读取与 API ===
 try:
     CLIENT_ID = st.secrets["amazon"]["client_id"]
     CLIENT_SECRET = st.secrets["amazon"]["client_secret"]
     REFRESH_TOKEN = st.secrets["amazon"]["refresh_token"]
     PROFILE_ID = st.secrets["amazon"]["profile_id"]
-except Exception as e:
-    st.error(f"❌ 配置文件读取失败: {e}")
+except:
+    st.error("❌ 配置文件读取失败")
     st.stop()
-
-# === 3. 核心功能 ===
 
 def get_access_token():
     url = "https://api.amazon.com/auth/o2/token"
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": REFRESH_TOKEN,
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET
-    }
+    data = {"grant_type": "refresh_token", "refresh_token": REFRESH_TOKEN, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}
     try:
         res = requests.post(url, data=data)
-        if res.status_code == 200: return res.json()['access_token']
-        return None
+        return res.json()['access_token'] if res.status_code == 200 else None
     except: return None
 
+# === 3. 数据获取 (复用 V7 逻辑) ===
 def request_report_v3(access_token):
-    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    # 这里我们拉取过去 7 天的数据，因为调广告看一天的数据不准
+    end_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    
     url = f"{API_HOST}/reporting/reports"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Amazon-Advertising-API-ClientId": CLIENT_ID,
-        "Amazon-Advertising-API-Scope": PROFILE_ID,
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {access_token}", "Amazon-Advertising-API-ClientId": CLIENT_ID, "Amazon-Advertising-API-Scope": PROFILE_ID, "Content-Type": "application/json"}
+    
+    # 强制新报表策略：加入 random 因子或微调列顺序
     payload = {
-        "startDate": yesterday,
-        "endDate": yesterday,
+        "startDate": start_date,
+        "endDate": end_date,
         "configuration": {
             "adProduct": "SPONSORED_PRODUCTS",
             "groupBy": ["campaign"],
-            "columns": ["impressions", "clicks", "cost", "sales1d", "purchases1d"],
+            "columns": ["cost", "sales1d", "purchases1d", "clicks", "impressions"],
             "reportTypeId": "spCampaigns",
-            "timeUnit": "DAILY",
+            "timeUnit": "SUMMARY", # 注意：我们要汇总数据来做决策
             "format": "GZIP_JSON"
         }
     }
-    st.info(f"📡 [V3 请求] 正在向 {region_name} 发送报表申请...")
+    st.info(f"📡 正在拉取过去7天 ({start_date} ~ {end_date}) 的数据进行分析...")
     res = requests.post(url, headers=headers, json=payload)
-    if res.status_code == 200 or res.status_code == 202: 
-        report_id = res.json()['reportId']
-        st.success(f"✅ 订单接收成功! ID: {report_id}")
-        return report_id
-    else:
-        st.error(f"❌ 下单失败: {res.status_code}")
-        st.code(res.text)
-        return None
-
-# 🔥 核心修改：增加了等待时间 (从30秒增加到3分钟)
-def wait_for_report_v3(access_token, report_id):
-    url = f"{API_HOST}/reporting/reports/{report_id}"
-    headers = {"Authorization": f"Bearer {access_token}", "Amazon-Advertising-API-ClientId": CLIENT_ID, "Amazon-Advertising-API-Scope": PROFILE_ID}
-    status_placeholder = st.empty()
     
-    # 修改：循环 60 次，每次 3 秒 = 180秒 (3分钟)
-    for i in range(60):
-        res = requests.get(url, headers=headers)
-        if res.status_code == 200:
-            data = res.json()
-            status = data.get('status')
-            
-            # 显示更详细的进度
-            status_placeholder.info(f"⏳ 亚马逊后台处理中... 状态: {status} (已等待 {i*3} 秒)")
-            
-            if status == 'COMPLETED':
-                status_placeholder.success("✅ 终于好啦！报表生成完毕！")
-                return data.get('url')
-            elif status == 'FAILURE': 
-                st.error("❌ 报表生成失败，亚马逊那边出错了")
-                return None
-        # 休息3秒再问
-        time.sleep(3)
-        
-    st.error("❌ 等待超过 3 分钟，亚马逊响应太慢，请稍后再试。")
+    if res.status_code in [200, 202]: return res.json()['reportId']
+    elif res.status_code == 425:
+        try: return res.json().get('detail', '').split(':')[-1].strip()
+        except: return None
     return None
 
-def get_report_data_v3(location_url, access_token):
-    try:
-        return pd.read_json(location_url, compression='gzip')
-    except Exception as e:
-        st.error(f"❌ 数据解析失败: {e}")
-        return pd.DataFrame()
+def wait_and_get_data(access_token, report_id):
+    url = f"{API_HOST}/reporting/reports/{report_id}"
+    headers = {"Authorization": f"Bearer {access_token}", "Amazon-Advertising-API-ClientId": CLIENT_ID, "Amazon-Advertising-API-Scope": PROFILE_ID}
+    
+    progress = st.progress(0)
+    for i in range(100):
+        res = requests.get(url, headers=headers)
+        if res.status_code == 200:
+            status = res.json().get('status')
+            progress.progress(min(i+1, 100))
+            if status == 'COMPLETED':
+                download_url = res.json().get('url')
+                return pd.read_json(download_url, compression='gzip')
+        time.sleep(2)
+    return pd.DataFrame()
 
-def get_campaign_names_map(access_token):
-    # 注意：这里用回 v2 拿名字，因为 v2 拿列表比较快且简单
-    # 如果 v2 也拿不到，可能需要换 v3，但先试试混合双打
+def get_campaign_names(access_token):
     url = f"{API_HOST}/v2/campaigns"
     headers = {"Authorization": f"Bearer {access_token}", "Amazon-Advertising-API-ClientId": CLIENT_ID, "Amazon-Advertising-API-Scope": PROFILE_ID}
-    params = {"stateFilter": "enabled,paused,archived", "count": 100}
-    res = requests.get(url, headers=headers, params=params)
-    name_map = {}
-    if res.status_code == 200:
-        for item in res.json():
-            name_map[item['campaignId']] = item['name']
-    return name_map
+    try:
+        res = requests.get(url, headers=headers, params={"stateFilter": "enabled,paused", "count": 100})
+        return {item['campaignId']: item['name'] for item in res.json()} if res.status_code == 200 else {}
+    except: return {}
 
-# === 4. 主界面逻辑 ===
-tab1, tab2 = st.tabs(["💰 昨日业绩 (V6.2)", "📂 历史数据"])
-
-with tab1:
-    st.header(f"昨日本地时间销售数据 ({VERSION})")
-    st.caption(f"当前区域: {region_name}")
+# === 4. 🧠 AI 核心算法 ===
+def analyze_and_optimize(df, target_acos, max_loss):
+    """
+    这是 AI 的大脑：根据数据生成建议
+    """
+    suggestions = []
     
-    if st.button("🚀 启动 (耐心版)", key="btn_v6_2"):
-        token = get_access_token()
-        if token:
-            report_id = request_report_v3(token)
-            if report_id:
-                url = wait_for_report_v3(token, report_id)
-                if url:
-                    df = get_report_data_v3(url, token)
-                    if not df.empty:
-                        # 智能清洗
-                        with st.spinner('正在同步广告活动名称...'):
-                            try:
-                                campaign_map = get_campaign_names_map(token)
-                                if 'campaignId' in df.columns:
-                                    df['campaignName'] = df['campaignId'].map(campaign_map)
-                                    df['campaignName'] = df['campaignName'].fillna(df['campaignId'].astype(str))
-                            except:
-                                pass # 如果拿名字失败，不影响显示数据
-                        
-                        rename_map = {
-                            'campaignName': '广告活动', 'campaign': '广告活动',
-                            'cost': '花费($)', 'sales1d': '销售额($)', 
-                            'purchases1d': '订单量', 'clicks': '点击', 'impressions': '曝光'
-                        }
-                        df = df.rename(columns={k:v for k,v in rename_map.items() if k in df.columns})
-                        df = df.fillna(0)
-                        
-                        if '花费($)' in df.columns and '销售额($)' in df.columns:
-                            df['ACOS'] = df.apply(lambda x: (x['花费($)']/x['销售额($)']*100) if x['销售额($)']>0 else 0, axis=1)
-                            df['ACOS'] = df['ACOS'].round(2).astype(str) + '%'
-                            df['花费($)'] = df['花费($)'].round(2)
-                            df['销售额($)'] = df['销售额($)'].round(2)
-                            
-                            # 整理列顺序
-                            base_cols = ['广告活动', '花费($)', '销售额($)', 'ACOS', '订单量', '点击', '曝光']
-                            final_cols = [c for c in base_cols if c in df.columns]
-                            df = df[final_cols]
-                            df = df.sort_values(by='花费($)', ascending=False)
-                            
-                            # 保存
-                            yesterday_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-                            file_name = f"reports/report_{yesterday_str}.csv"
-                            df.to_csv(file_name, index=False)
-                            st.success(f"✅ 成功存档: {file_name}")
-                            
-                            # 展示
-                            t_spend = df['花费($)'].sum()
-                            t_sales = df['销售额($)'].sum()
-                            t_acos = (t_spend/t_sales*100) if t_sales>0 else 0
-                            c1,c2,c3 = st.columns(3)
-                            c1.metric("总花费", f"${t_spend:.2f}")
-                            c2.metric("总销售额", f"${t_sales:.2f}")
-                            c3.metric("总ACOS", f"{t_acos:.2f}%")
-                            st.dataframe(df)
-                        else:
-                            st.warning("数据列不完整")
-                            st.write(df)
-                    else:
-                        st.warning("昨日无数据")
+    for index, row in df.iterrows():
+        spend = row['花费($)']
+        sales = row['销售额($)']
+        acos = row['ACOS_Value']
+        name = row['广告活动']
+        
+        action = "保持"
+        reason = "数据正常"
+        color = "white"
+        
+        # 1. 🟥 止损逻辑：花费超过容忍值且 0 出单
+        if sales == 0 and spend > max_loss:
+            action = "🛑 强烈建议关停/否词"
+            reason = f"0出单，花费已超 ${max_loss}"
+            color = "#ffcccc" # 红色预警
+            
+        # 2. 🟨 降价逻辑：有出单，但 ACOS 高于目标
+        elif sales > 0 and acos > target_acos:
+            diff = acos - target_acos
+            if diff > 0.2: # 高出 20%
+                action = f"📉 建议降价/降预算 (大幅 -{int(ADJ_RATE*2*100)}%)"
+            else:
+                action = f"↘️ 建议微调降价 (-{int(ADJ_RATE*100)}%)"
+            reason = f"当前 ACOS {acos*100:.1f}% > 目标 {target_acos*100:.0f}%"
+            color = "#fff4cc" # 黄色警告
+            
+        # 3. 🟩 拓量逻辑：有出单，且 ACOS 优于目标 (表现好)
+        elif sales > 0 and acos < target_acos and spend > 0:
+            action = f"🚀 建议加预算/加价 (+{int(ADJ_RATE*100)}%)"
+            reason = f"表现优异 (ACOS {acos*100:.1f}%)，可扩量"
+            color = "#ccffcc" # 绿色利好
+            
+        suggestions.append({
+            "广告活动": name,
+            "花费": spend,
+            "销售额": sales,
+            "当前ACOS": f"{acos*100:.1f}%",
+            "🤖 AI 建议操作": action,
+            "决策理由": reason,
+            "_color": color # 用于后续上色
+        })
+        
+    return pd.DataFrame(suggestions)
 
-with tab2:
-    st.header("📂 历史报表")
-    if os.path.exists('reports'):
-        files = [f for f in os.listdir('reports') if f.endswith('.csv')]
-        if files:
-            f = st.selectbox("选择日期:", files)
-            if f:
-                st.dataframe(pd.read_csv(f"reports/{f}"), use_container_width=True)
+# === 5. 主界面 ===
+if st.button("🚀 启动 AI 诊断 (分析过去7天数据)", type="primary"):
+    token = get_access_token()
+    if token:
+        report_id = request_report_v3(token)
+        if report_id:
+            raw_df = wait_and_get_data(token, report_id)
+            if not raw_df.empty:
+                # === 数据清洗 ===
+                camp_map = get_campaign_names(token)
+                if 'campaignId' in raw_df.columns:
+                    raw_df['campaignName'] = raw_df['campaignId'].map(camp_map).fillna(raw_df['campaignId'].astype(str))
+                
+                rename = {'campaignName':'广告活动', 'cost':'花费($)', 'sales1d':'销售额($)'}
+                df = raw_df.rename(columns={k:v for k,v in rename.items() if k in raw_df.columns})
+                df = df.fillna(0)
+                
+                # 计算 ACOS 数值版 (用于计算)
+                df['ACOS_Value'] = df.apply(lambda x: (x['花费($)']/x['销售额($)']) if x['销售额($)']>0 else 0, axis=1)
+                
+                # === 🧠 AI 开始工作 ===
+                st.success("✅ 数据获取成功，AI 正在分析您的广告表现...")
+                result_df = analyze_and_optimize(df, TARGET_ACOS, MAX_SPEND_NO_SALE)
+                
+                # === 展示结果 ===
+                
+                # 1. 🛑 需要紧急处理的 (红色)
+                st.subheader("🚨 紧急警报 (建议立即处理)")
+                urgent = result_df[result_df['_color'] == "#ffcccc"].drop(columns=['_color'])
+                if not urgent.empty:
+                    st.dataframe(urgent, use_container_width=True)
+                else:
+                    st.info("👏 很棒！没有发现严重亏损的广告活动。")
+
+                # 2. 📉 需要优化的 (黄色)
+                st.subheader("📉 优化建议 (ACOS 偏高)")
+                optimize = result_df[result_df['_color'] == "#fff4cc"].drop(columns=['_color'])
+                if not optimize.empty:
+                    st.dataframe(optimize, use_container_width=True)
+
+                # 3. 🚀 潜力股 (绿色)
+                st.subheader("🚀 潜力爆款 (建议加注)")
+                good = result_df[result_df['_color'] == "#ccffcc"].drop(columns=['_color'])
+                if not good.empty:
+                    st.dataframe(good, use_container_width=True)
+                    
+            else:
+                st.warning("暂无数据")
