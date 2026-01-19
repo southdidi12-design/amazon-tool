@@ -1,261 +1,172 @@
 import streamlit as st
-import pandas as pd
 import requests
-import json
+import pandas as pd
+import time
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# === 1. 全局配置 (专业风格) ===
-st.set_page_config(
-    page_title="Amazon PPC 智能助手 v5.15", 
-    layout="wide", 
-    page_icon="📊",
-    initial_sidebar_state="expanded"
-)
+# === 页面基本设置 ===
+st.set_page_config(layout="wide", page_title="HNV 亚马逊指挥中心 V3")
+st.title("🚀 HNV Amazon 广告指挥中心 (带存储版)")
 
-st.markdown("""
-<style>
-    .main { background-color: #f8f9fa; }
-    div[data-testid="stMetric"] { background-color: white; border: 1px solid #ddd; padding: 10px; border-radius: 8px; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stButton>button { width: 100%; border-radius: 4px; }
-    .ai-thought { background-color: #fff; padding: 12px; border: 1px solid #eee; border-radius: 4px; font-size: 14px; margin-top: 8px; color: #333;}
-    
-    /* ASIN 链接样式 (专业蓝) */
-    .asin-link { 
-        font-size: 14px; 
-        color: #0066c0; 
-        text-decoration: none;
-        padding-bottom: 5px;
-        display: block;
+# === 0. 自动创建数据文件夹 (新功能) ===
+# 如果没有 'reports' 文件夹，就自动建一个，用来存 Excel/CSV
+if not os.path.exists('reports'):
+    os.makedirs('reports')
+
+# === 1. 读取配置 ===
+try:
+    CLIENT_ID = st.secrets["amazon"]["client_id"]
+    CLIENT_SECRET = st.secrets["amazon"]["client_secret"]
+    REFRESH_TOKEN = st.secrets["amazon"]["refresh_token"]
+    PROFILE_ID = st.secrets["amazon"]["profile_id"]
+except Exception as e:
+    st.error(f"❌ 配置文件读取失败: {e}")
+    st.stop()
+
+# === 2. 通用函数 ===
+def get_access_token():
+    url = "https://api.amazon.com/auth/o2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": REFRESH_TOKEN,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET
     }
-    .asin-link:hover { text-decoration: underline; color: #c45500; }
-</style>
-""", unsafe_allow_html=True)
-
-# === 2. 核心逻辑 ===
-DATA_FILE = "deepseek_cot_data.jsonl"
-
-def save_manual_label(term, spend, clicks, orders, action):
-    # 保存人工标记数据
-    train_data = {
-        "messages": [
-            {"role": "system", "content": "PPC专家"},
-            {"role": "user", "content": f"词:{term}, 费:{spend}, 单:{orders}"},
-            {"role": "assistant", "content": f"【人工标记】\n-> 操作: {action}"}
-        ]
-    }
-    with open(DATA_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(train_data, ensure_ascii=False) + "\n")
-    st.toast(f"✅ 已记录: {term} -> {action}")
-
-def generate_and_save_ai_thought(api_key, term, spend, clicks, orders, user_intent):
-    if not api_key: return None
-    cpc = spend / clicks if clicks > 0 else 0
-    prompt = f"""
-    分析师角色。产品: Makeup Mirror。对象: "{term}"。
-    输出 JSON (reasoning, action)。
-    数据: 花费${spend}, 点击{clicks}, CPC ${cpc:.2f}, 订单{orders}。
-    逻辑: 1.CPC是否合理? 2.点击量是否显著? 3.用户意图匹配度?
-    倾向: {user_intent}。
-    """
     try:
-        with st.spinner(f"分析中..."):
-            res = requests.post(
-                "https://api.deepseek.com/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "temperature": 0.5, "response_format": {"type": "json_object"}}
-            )
-            if res.status_code == 200:
-                ai_json = json.loads(res.json()['choices'][0]['message']['content'])
-                train_data = {
-                    "messages": [{"role": "user", "content": f"词:{term}"}, {"role": "assistant", "content": f"{ai_json.get('reasoning')}\n-> {ai_json.get('action')}"}]
-                }
-                with open(DATA_FILE, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(train_data, ensure_ascii=False) + "\n")
-                return ai_json.get('reasoning')
+        res = requests.post(url, data=data)
+        if res.status_code == 200: return res.json()['access_token']
+        return None
     except: return None
 
-# === 3. 侧边栏 ===
-st.sidebar.title("📊 控制台")
-st.sidebar.caption("v5.15 专业版")
+# === 3. 业绩报告功能 ===
+def request_report(access_token):
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+    url = "https://advertising-api.amazon.com/v2/reports"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Amazon-Advertising-API-ClientId": CLIENT_ID,
+        "Amazon-Advertising-API-Scope": PROFILE_ID,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "campaignType": "sponsoredProducts",
+        "recordType": "campaigns",
+        "reportDate": yesterday,
+        "metrics": "campaignName,campaignId,impressions,clicks,cost,attributedSales1d,attributedUnitsOrdered1d"
+    }
+    res = requests.post(url, headers=headers, json=payload)
+    if res.status_code == 202: return res.json()['reportId']
+    return None
 
-default_key = "sk-55cc3f56742f4e43be099c9489e02911"
-deepseek_key = st.sidebar.text_input("🔑 DeepSeek Key", value=default_key, type="password")
-product_name = st.sidebar.text_input("📦 产品名称", value="Makeup Mirror")
+def wait_for_report(access_token, report_id):
+    url = f"https://advertising-api.amazon.com/v2/reports/{report_id}"
+    headers = {"Authorization": f"Bearer {access_token}", "Amazon-Advertising-API-ClientId": CLIENT_ID, "Amazon-Advertising-API-Scope": PROFILE_ID}
+    status_placeholder = st.empty()
+    for i in range(15):
+        res = requests.get(url, headers=headers)
+        if res.status_code == 200:
+            status = res.json().get('status')
+            status_placeholder.info(f"⏳ 报告生成中... {status} ({i*2}s)")
+            if status == 'SUCCESS':
+                status_placeholder.success("✅ 报告就绪！")
+                return res.json().get('location')
+            elif status == 'FAILURE': return None
+        time.sleep(2)
+    return None
 
-st.sidebar.markdown("---")
-with st.sidebar.expander("⚙️ 参数设置", expanded=True):
-    target_acos = st.slider("目标 ACoS", 0.1, 1.0, 0.3)
-    gold_acos = st.slider("黄金词 ACoS 上限", 0.1, 1.0, 0.2)
+def get_report_data(location_url, access_token):
+    headers = {"Authorization": f"Bearer {access_token}", "Amazon-Advertising-API-ClientId": CLIENT_ID}
+    res = requests.get(location_url, headers=headers)
+    return res.json() if res.status_code == 200 else []
 
-st.sidebar.markdown("---")
-if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "r", encoding="utf-8") as f: count = sum(1 for _ in f)
-    st.sidebar.metric("📚 训练样本数", f"{count}")
-    with open(DATA_FILE, "r", encoding="utf-8") as f: st.sidebar.download_button("📥 导出训练数据", f, file_name="training_data.jsonl")
+# === 4. 广告列表功能 ===
+def get_campaigns_list(access_token):
+    url = "https://advertising-api.amazon.com/v2/campaigns"
+    headers = {"Authorization": f"Bearer {access_token}", "Amazon-Advertising-API-ClientId": CLIENT_ID, "Amazon-Advertising-API-Scope": PROFILE_ID}
+    params = {"stateFilter": "enabled,paused", "count": 50}
+    res = requests.get(url, headers=headers, params=params)
+    return res.json() if res.status_code == 200 else []
 
-# === 4. 主界面 ===
-st.title("📊 Amazon PPC 智能助手")
-st.caption("数据清洗 | 智能分析 | 竞价优化")
+# === 5. 主界面逻辑 (3个Tab) ===
+tab1, tab2, tab3 = st.tabs(["💰 昨日业绩 (自动存)", "📂 历史数据回看", "📝 广告状态管理"])
 
-c1, c2 = st.columns(2)
-with c1:
-    file_bulk = st.file_uploader("📂 1. 上传 Bulk Operation File", type=['xlsx', 'csv'], key="bulk")
-with c2:
-    file_term = st.file_uploader("📂 2. 上传 Search Term Report", type=['xlsx', 'csv'], key="term")
-
-# 读取逻辑
-def smart_load_bulk(file):
-    if not file: return pd.DataFrame()
-    try:
-        if file.name.endswith('.csv'): return pd.read_csv(file)
-        dfs = pd.read_excel(file, sheet_name=None, engine='openpyxl')
-        for sheet_name, df in dfs.items():
-            cols = df.columns.astype(str).tolist()
-            if any(x in cols for x in ['实体层级', 'Record Type']) and any(x in cols for x in ['关键词文本', 'Keyword Text', '投放']):
-                st.toast(f"✅ 已加载工作表: {sheet_name}")
-                return df
-        return pd.DataFrame()
-    except: return pd.DataFrame()
-
-df_bulk = smart_load_bulk(file_bulk)
-
-def load_simple(file):
-    if not file: return pd.DataFrame()
-    try:
-        if file.name.endswith('.csv'): return pd.read_csv(file)
-        return pd.read_excel(file, engine='openpyxl')
-    except: return pd.DataFrame()
-
-df_term = load_simple(file_term)
-
-if not df_bulk.empty: df_bulk.columns = df_bulk.columns.astype(str).str.strip()
-if not df_term.empty: df_term.columns = df_term.columns.astype(str).str.strip()
-
-# 全局数据预处理
-bulk_ready = False
-df_kws = pd.DataFrame()
-bk_cols = {}
-
-if not df_bulk.empty:
-    cols = df_bulk.columns
-    bk_cols['spend'] = '花费'
-    bk_cols['sales'] = next((c for c in ['销量', '销售额', '7天总销售额', 'Sales'] if c in cols), None)
-    bk_cols['clicks'] = '点击量'
-    bk_cols['entity'] = '实体层级'
-    bk_cols['kw'] = next((c for c in ['关键词文本', '投放'] if c in cols), None)
-    bk_cols['bid'] = next((c for c in ['竞价', 'Keyword Bid'] if c in cols), None)
-    bk_cols['orders'] = '订单数量'
-
-    if bk_cols['entity'] and bk_cols['kw'] and bk_cols['sales'] and bk_cols['spend']:
-        df_kws = df_bulk[df_bulk[bk_cols['entity']].astype(str).str.contains('Keyword|关键词|Targeting', case=False, na=False)].copy()
-        for c in [bk_cols['spend'], bk_cols['sales'], bk_cols['clicks'], bk_cols['bid'], bk_cols['orders']]:
-            if c: df_kws[c] = pd.to_numeric(df_kws[c], errors='coerce').fillna(0)
-        df_kws['ACoS'] = df_kws.apply(lambda x: x[bk_cols['spend']]/x[bk_cols['sales']] if x[bk_cols['sales']]>0 else 0, axis=1)
-        bulk_ready = True
-
-# === 5. 功能标签页 ===
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🔍 否词清洗", "📈 数据看板", "💰 竞价建议", "🏆 潜力词挖掘", "🔗 关联分析"
-])
-
-# --- Tab 1: 否词清洗 ---
+# --- Tab 1: 业绩 (带保存功能) ---
 with tab1:
-    st.subheader("🔍 无效流量清洗")
-    st.info("筛选规则：有花费、0 订单、高点击。")
-    
-    if not df_term.empty:
-        c_term = '客户搜索词'
-        c_spend = '花费'
-        c_orders = '7天总订单数(#)'
-        c_clicks = '点击量'
-        
-        if c_term in df_term.columns:
-            df_term[c_spend] = pd.to_numeric(df_term[c_spend], errors='coerce').fillna(0)
-            df_term[c_orders] = pd.to_numeric(df_term[c_orders], errors='coerce').fillna(0)
-            df_term[c_clicks] = pd.to_numeric(df_term[c_clicks], errors='coerce').fillna(0)
-            
-            mask = (df_term[c_orders] == 0) & (df_term[c_spend] > 0)
-            review_df = df_term[mask].sort_values(by=c_spend, ascending=False).head(20)
-            
-            if not review_df.empty:
-                for idx, row in review_df.iterrows():
-                    term_val = str(row[c_term])
-                    spend_val = row[c_spend]
-                    clicks_val = row[c_clicks]
-                    cpc_val = spend_val / clicks_val if clicks_val > 0 else 0
-                    
-                    # 标题格式：词 | 花费 | 点击 | CPC
-                    label = f"{term_val} | 花费: ${spend_val:.2f} | 点击: {int(clicks_val)} | CPC: ${cpc_val:.2f}"
-                    
-                    with st.expander(label, expanded=True):
-                        # ASIN 跳转链接
-                        if term_val.lower().startswith("b0"):
-                            st.markdown(f"<a href='https://www.amazon.com/dp/{term_val}' target='_blank' class='asin-link'>🔗 查看商品页面 ({term_val})</a>", unsafe_allow_html=True)
-                        
-                        c1, c2, c3 = st.columns([1, 1, 3])
-                        with c1:
-                            if st.button("❌ 否定", key=f"neg_{idx}", type="primary"):
-                                save_manual_label(term_val, spend_val, clicks_val, 0, "Negative")
-                        with c2:
-                            if st.button("✅ 保留", key=f"keep_{idx}"):
-                                save_manual_label(term_val, spend_val, clicks_val, 0, "Keep")
-                        with c3:
-                            if st.button("🧠 AI 分析", key=f"ai_{idx}"):
-                                reasoning = generate_and_save_ai_thought(deepseek_key, term_val, spend_val, clicks_val, 0, "Unknown")
-                                if reasoning: st.session_state[f"res_{idx}"] = reasoning
+    st.header("昨日本地时间销售数据")
+    if st.button("🚀 获取并保存数据", key="btn_report"):
+        with st.spinner('正在连接亚马逊...'):
+            token = get_access_token()
+            if token:
+                report_id = request_report(token)
+                if report_id:
+                    url = wait_for_report(token, report_id)
+                    if url:
+                        data = get_report_data(url, token)
+                        if data:
+                            df = pd.DataFrame(data)
+                            # 数据清洗
+                            rename = {'campaignName':'广告活动','cost':'花费($)','attributedSales1d':'销售额($)','clicks':'点击'}
+                            df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
+                            df = df.fillna(0)
                             
-                            if f"res_{idx}" in st.session_state:
-                                st.markdown(f"""<div class="ai-thought"><b>分析报告：</b><br>{st.session_state[f"res_{idx}"]}</div>""", unsafe_allow_html=True)
-            else: st.success("未发现异常高花费的词。")
-    else: st.info("请先上传 Search Term 表格。")
+                            # 算ACOS
+                            if '花费($)' in df.columns and '销售额($)' in df.columns:
+                                df['ACOS'] = df.apply(lambda x: (x['花费($)']/x['销售额($)']*100) if x['销售额($)']>0 else 0, axis=1)
+                                df['ACOS_Value'] = df['ACOS'] # 留一个数字版用于计算
+                                df['ACOS'] = df['ACOS'].round(2).astype(str) + '%'
+                                df['花费($)'] = df['花费($)'].round(2)
+                                df['销售额($)'] = df['销售额($)'].round(2)
+                                df = df.sort_values(by='花费($)', ascending=False)
+                                
+                                # === 💾 核心新功能：保存到本地 ===
+                                yesterday_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+                                file_name = f"reports/report_{yesterday_str}.csv"
+                                df.to_csv(file_name, index=False)
+                                st.success(f"✅ 数据已自动保存到: {file_name}")
+                                
+                                # 展示
+                                t_spend = df['花费($)'].sum()
+                                t_sales = df['销售额($)'].sum()
+                                t_acos = (t_spend/t_sales*100) if t_sales>0 else 0
+                                c1,c2,c3 = st.columns(3)
+                                c1.metric("总花费", f"${t_spend}")
+                                c2.metric("总销售额", f"${t_sales}")
+                                c3.metric("总ACOS", f"{t_acos:.2f}%")
+                                st.dataframe(df)
+                            else:
+                                st.warning("数据列缺失")
+                        else:
+                            st.warning("昨日无数据")
 
-# --- Tab 2: 看板 ---
+# --- Tab 2: 历史记录 (新功能) ---
 with tab2:
-    st.subheader("📈 账户概览")
-    if bulk_ready:
-        t_spend = df_kws[bk_cols['spend']].sum()
-        t_sales = df_kws[bk_cols['sales']].sum()
-        m1, m2 = st.columns(2)
-        m1.metric("总花费 (Spend)", f"${t_spend:,.2f}")
-        m2.metric("总销售额 (Sales)", f"${t_sales:,.2f}")
-        
-        st.markdown("#### 关键词效能分布")
-        st.scatter_chart(df_kws[df_kws[bk_cols['spend']]>0], x=bk_cols['spend'], y=bk_cols['sales'], size=bk_cols['clicks'], color='ACoS')
-    else: st.info("请先上传 Bulk 表格。")
+    st.header("📂 历史报表回溯")
+    # 扫描 reports 文件夹里的文件
+    if os.path.exists('reports'):
+        files = [f for f in os.listdir('reports') if f.endswith('.csv')]
+        if files:
+            selected_file = st.selectbox("选择要查看的历史日期:", files)
+            if selected_file:
+                # 读取 CSV
+                history_df = pd.read_csv(f"reports/{selected_file}")
+                st.write(f"### 📅 {selected_file} 的数据")
+                st.dataframe(history_df, use_container_width=True)
+        else:
+            st.info("📭 还没有存档记录，快去 Tab 1 点击获取数据吧！")
+    else:
+        st.info("📭 还没有创建数据文件夹。")
 
-# --- Tab 3: 竞价 ---
+# --- Tab 3: 列表管理 ---
 with tab3:
-    st.subheader(f"💰 降价建议 (ACoS > {target_acos*100}%)")
-    if bulk_ready:
-        bad = df_kws[(df_kws[bk_cols['orders']] > 0) & (df_kws['ACoS'] > target_acos)].sort_values(by='ACoS', ascending=False).head(50)
-        if not bad.empty:
-            show_df = bad[[bk_cols['kw'], bk_cols['bid'], 'ACoS', bk_cols['spend'], bk_cols['sales']]].copy()
-            show_df['建议出价'] = show_df[bk_cols['bid']] * 0.8
-            st.dataframe(show_df, column_config={"ACoS": st.column_config.ProgressColumn(format="%.2f", max_value=2)}, use_container_width=True)
-        else: st.success("所有出单词 ACoS 均达标。")
-    else: st.info("请先上传 Bulk 表格。")
-
-# --- Tab 4: 黄金词 ---
-with tab4:
-    st.subheader(f"🏆 潜力词挖掘 (ACoS < {gold_acos*100}%)")
-    if bulk_ready:
-        gold_df = df_kws[(df_kws[bk_cols['orders']] >= 2) & (df_kws['ACoS'] > 0) & (df_kws['ACoS'] < gold_acos)].sort_values(by=bk_cols['sales'], ascending=False).head(50)
-        if not gold_df.empty:
-            show_df = gold_df[[bk_cols['kw'], bk_cols['bid'], 'ACoS', bk_cols['sales']]].copy()
-            show_df['建议出价'] = show_df[bk_cols['bid']] * 1.2
-            st.dataframe(show_df, column_config={"ACoS": st.column_config.ProgressColumn(format="%.2f", max_value=0.5)}, use_container_width=True)
-        else: st.info("暂无符合条件的潜力词，请尝试调整左侧阈值。")
-    else: st.info("请先上传 Bulk 表格。")
-
-# --- Tab 5: 关联 ---
-with tab5:
-    st.subheader("🔗 关联购买分析")
-    if not df_term.empty:
-        c_halo = '7天内其他SKU销售量(#)'
-        if c_halo in df_term.columns:
-            df_term[c_halo] = pd.to_numeric(df_term[c_halo], errors='coerce').fillna(0)
-            halo = df_term[df_term[c_halo]>0].sort_values(by=c_halo, ascending=False).head(20)
-            if not halo.empty: st.dataframe(halo[['客户搜索词', c_halo, '花费']], use_container_width=True)
-            else: st.info("暂无关联订单数据。")
+    st.header("所有 SP 广告活动状态")
+    if st.button("🔄 刷新列表", key="btn_list"):
+        with st.spinner('正在拉取...'):
+            token = get_access_token()
+            if token:
+                campaigns = get_campaigns_list(token)
+                if campaigns:
+                    df = pd.DataFrame(campaigns)
+                    cols = ['name', 'state', 'dailyBudget', 'targetingType']
+                    exist_cols = [c for c in cols if c in df.columns]
+                    st.dataframe(df[exist_cols], use_container_width=True)
