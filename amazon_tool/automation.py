@@ -14,6 +14,7 @@ from .amazon_api import (
     list_sp_keywords,
     list_sp_negative_keywords,
     list_sp_targets,
+    update_campaign_budget,
     update_sp_campaign_bidding,
     update_sp_keyword_bids,
     update_sp_target_bids,
@@ -29,9 +30,12 @@ from .config import (
     AUTO_NEGATIVE_PROTECT_KEY,
     AUTO_NEGATIVE_PROTECT_MODE_KEY,
     AUTO_NEGATIVE_SPEND_KEY,
+    MIN_BUDGET,
     MIN_BID,
     REPORT_POLL_MAX,
     REPORT_POLL_SLEEP_SECONDS,
+    get_auto_ai_campaign_daily_budget,
+    get_auto_ai_campaign_whitelist,
     get_real_today,
 )
 from .db import (
@@ -505,6 +509,80 @@ def run_optimization_logic(
 
         ads = pd.read_sql("SELECT ad_group_id, asin, sku, state FROM product_ads", conn)
         ad_groups = pd.read_sql("SELECT ad_group_id, campaign_id, state FROM ad_group_settings", conn)
+        campaigns = list_sp_campaigns(session, headers, include_extended=True)
+
+        whitelist = [w.strip() for w in get_auto_ai_campaign_whitelist() if str(w).strip()]
+        allowed_campaign_ids = None
+        campaign_name_map = {}
+        if whitelist:
+            for c in campaigns:
+                campaign_id = c.get("campaignId", c.get("campaign_id"))
+                if campaign_id is None:
+                    continue
+                campaign_name_map[str(campaign_id)] = str(c.get("name", "")).strip()
+            allowed_campaign_ids = {cid for cid, name in campaign_name_map.items() if name in whitelist}
+            if not allowed_campaign_ids:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                reason = f"未匹配到白名单活动: {', '.join(whitelist)}"
+                logs.append(
+                    {
+                        "时间": ts,
+                        "广告": "系统",
+                        "类型": "自动驾驶",
+                        "动作": "白名单过滤",
+                        "原价": 0,
+                        "新价": 0,
+                        "理由": reason,
+                    }
+                )
+                with db_write_lock():
+                    conn.execute(
+                        "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                        (ts, "系统", "白名单过滤", 0, 0, reason, "失败"),
+                    )
+                    conn.commit()
+                conn.close()
+                return logs
+
+        if whitelist and campaigns:
+            desired_budget = max(MIN_BUDGET, float(get_auto_ai_campaign_daily_budget() or 0))
+            for c in campaigns:
+                campaign_id = c.get("campaignId", c.get("campaign_id"))
+                if campaign_id is None:
+                    continue
+                campaign_id = str(campaign_id)
+                if allowed_campaign_ids is not None and campaign_id not in allowed_campaign_ids:
+                    continue
+                budget_obj = c.get("budget", {})
+                if not isinstance(budget_obj, dict):
+                    budget_obj = {}
+                current_budget = float(budget_obj.get("budget", c.get("budget", 0)) or 0)
+                budget_type = budget_obj.get("budgetType", c.get("budgetType", "DAILY"))
+                if abs(current_budget - desired_budget) < 0.01:
+                    continue
+                status = "模拟"
+                if is_live_mode:
+                    ok, _ = update_campaign_budget(session, headers, "SP", campaign_id, desired_budget, budget_type)
+                    status = "已执行" if ok else "失败"
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                reason = f"预算调整: ${current_budget:.2f} -> ${desired_budget:.2f}"
+                logs.append(
+                    {
+                        "时间": ts,
+                        "广告": campaign_name_map.get(campaign_id, f"活动:{campaign_id}"),
+                        "类型": "预算",
+                        "动作": "SP 活动预算",
+                        "原价": current_budget,
+                        "新价": desired_budget,
+                        "理由": reason,
+                    }
+                )
+                with db_write_lock():
+                    conn.execute(
+                        "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                        (ts, f"活动:{campaign_id}", "SP 活动预算", current_budget, desired_budget, reason, status),
+                    )
+                    conn.commit()
 
         enabled_states = ["ENABLED", "ENABLED_WITH_PENDING_CHANGES"]
         ad_group_campaign = {}
@@ -514,6 +592,8 @@ def run_optimization_logic(
             ad_groups["campaign_id"] = ad_groups["campaign_id"].fillna("").astype(str)
             groups_state = ad_groups["state"].fillna("").astype(str).str.upper()
             ad_groups = ad_groups[(groups_state == "") | (groups_state.isin(enabled_states))]
+            if allowed_campaign_ids is not None:
+                ad_groups = ad_groups[ad_groups["campaign_id"].isin(allowed_campaign_ids)]
             ad_group_campaign = dict(zip(ad_groups["ad_group_id"], ad_groups["campaign_id"]))
             enabled_ad_groups = set(ad_groups["ad_group_id"].tolist())
 
@@ -526,6 +606,8 @@ def run_optimization_logic(
         ad_group_map = {}
         for ad_group_id, group in ads.groupby("ad_group_id"):
             if not ad_group_id:
+                continue
+            if enabled_ad_groups is not None and str(ad_group_id) not in enabled_ad_groups:
                 continue
             asins = sorted({a for a in group["asin"].tolist() if a})
             if len(asins) != 1:
@@ -544,7 +626,13 @@ def run_optimization_logic(
         ad_group_campaign = dict(zip(ad_groups["ad_group_id"], ad_groups["campaign_id"]))
         keywords = list_sp_keywords(session, headers)
         targets = list_sp_targets(session, headers)
-        campaigns = list_sp_campaigns(session, headers, include_extended=True)
+        campaigns_for_placement = campaigns
+        if allowed_campaign_ids is not None:
+            campaigns_for_placement = [
+                c
+                for c in campaigns
+                if str(c.get("campaignId", c.get("campaign_id")) or "") in allowed_campaign_ids
+            ]
 
         keyword_updates = []
         target_updates = []
@@ -608,7 +696,7 @@ def run_optimization_logic(
         placement_predicates = ["placementTop", "placementProductPage", "placementRestOfSearch"]
         defaults_up = {"placementTop": 20, "placementProductPage": 10, "placementRestOfSearch": 5}
         campaign_bids = {}
-        for c in campaigns:
+        for c in campaigns_for_placement:
             campaign_id = c.get("campaignId", c.get("campaign_id"))
             if not campaign_id:
                 continue

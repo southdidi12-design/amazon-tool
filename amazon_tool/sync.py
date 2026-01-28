@@ -5,7 +5,17 @@ import time
 from datetime import datetime, timedelta
 
 import pandas as pd
-import streamlit as st
+try:
+    import streamlit as st
+except Exception:
+    class _FallbackStreamlit:
+        def cache_resource(self, func):
+            return func
+
+        def experimental_singleton(self, func):
+            return func
+
+    st = _FallbackStreamlit()
 
 from .amazon_api import get_amazon_session_and_headers, get_media_headers, get_row_value
 from .config import (

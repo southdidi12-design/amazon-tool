@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,8 @@ AUTO_AI_MAX_BID_KEY = "auto_ai_max_bid"
 AUTO_AI_STOP_LOSS_KEY = "auto_ai_stop_loss"
 AUTO_AI_LIVE_KEY = "auto_ai_live"
 AUTO_AI_LAST_RUN_KEY = "auto_ai_last_run"
+AUTO_AI_CAMPAIGN_WHITELIST = ["3305-自动-2025-10-13 (AB)测试"]
+AUTO_AI_CAMPAIGN_DAILY_BUDGET = 10.0
 AUTO_NEGATIVE_ENABLED_KEY = "auto_negative_enabled"
 AUTO_NEGATIVE_LEVEL_KEY = "auto_negative_level"
 AUTO_NEGATIVE_MATCH_KEY = "auto_negative_match"
@@ -50,6 +53,32 @@ TARGETING_MEDIA = "application/vnd.spTargetingClause.v3+json"
 NEGATIVE_KEYWORD_MEDIA = "application/vnd.spNegativeKeyword.v3+json"
 CAMPAIGN_NEGATIVE_KEYWORD_MEDIA = "application/vnd.spCampaignNegativeKeyword.v3+json"
 NEGATIVE_TARGET_MEDIA = "application/vnd.spNegativeTargetingClause.v2+json"
+
+
+def _parse_env_list(value):
+    items = []
+    for chunk in str(value or "").replace(",", "\n").splitlines():
+        chunk = chunk.strip()
+        if chunk:
+            items.append(chunk)
+    return items
+
+
+def get_auto_ai_campaign_whitelist():
+    env_val = os.getenv("AUTO_AI_CAMPAIGN_WHITELIST")
+    if env_val:
+        return _parse_env_list(env_val)
+    return AUTO_AI_CAMPAIGN_WHITELIST
+
+
+def get_auto_ai_campaign_daily_budget():
+    env_val = os.getenv("AUTO_AI_CAMPAIGN_DAILY_BUDGET")
+    if env_val:
+        try:
+            return float(env_val)
+        except Exception:
+            return AUTO_AI_CAMPAIGN_DAILY_BUDGET
+    return AUTO_AI_CAMPAIGN_DAILY_BUDGET
 
 
 def get_real_today():

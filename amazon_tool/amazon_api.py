@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-import streamlit as st
+try:
+    import streamlit as st
+except Exception:
+    class _FallbackStreamlit:
+        secrets = {}
+
+    st = _FallbackStreamlit()
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
