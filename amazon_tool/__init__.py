@@ -1,0 +1,1 @@
+"""Amazon tool package."""
