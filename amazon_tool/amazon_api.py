@@ -175,6 +175,20 @@ def list_sp_keywords(session, headers):
     return []
 
 
+def create_sp_keywords(session, headers, keywords):
+    if not keywords:
+        return True, None
+    h = get_media_headers(headers, KEYWORD_MEDIA)
+    payload = {"keywords": keywords}
+    res = session.post("https://advertising-api.amazon.com/sp/keywords", headers=h, json=payload, timeout=30)
+    if res.status_code in [200, 207]:
+        return True, res.json()
+    res2 = session.post("https://advertising-api.amazon.com/sp/keywords", headers=h, json=keywords, timeout=30)
+    if res2.status_code in [200, 207]:
+        return True, res2.json()
+    return False, f"{res.status_code} {res.text}"
+
+
 def list_sp_targets(session, headers):
     items, status = _post_list(
         session,

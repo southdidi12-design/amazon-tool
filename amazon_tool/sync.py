@@ -152,7 +152,7 @@ def _resolve_asin_columns(base_columns, allowed, sales_candidates, orders_candid
 
 
 def _connect_db():
-    db = _connect_db()
+    db = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30)
     try:
         db.execute("PRAGMA journal_mode=WAL;")
         db.execute("PRAGMA synchronous=NORMAL;")
@@ -536,7 +536,16 @@ def sync_campaign_report(
     return True, None
 
 
-def sync_asin_report(session, headers, d_str, columns=None, sales_keys=None, orders_keys=None, allow_retry=True):
+def sync_asin_report(
+    session,
+    headers,
+    d_str,
+    columns=None,
+    sales_keys=None,
+    orders_keys=None,
+    allow_retry=True,
+    group_by=None,
+):
     if columns is None:
         columns = [
             "advertisedAsin",
@@ -547,6 +556,8 @@ def sync_asin_report(session, headers, d_str, columns=None, sales_keys=None, ord
             "impressions",
             "purchases1d",
         ]
+    if group_by is None:
+        group_by = ["advertisedProduct"]
     if sales_keys is None:
         sales_keys = ["sales7d", "sales14d", "sales1d", "sales"]
     if orders_keys is None:
@@ -562,7 +573,7 @@ def sync_asin_report(session, headers, d_str, columns=None, sales_keys=None, ord
                 "endDate": d_str,
                 "configuration": {
                     "adProduct": "SPONSORED_PRODUCTS",
-                    "groupBy": ["advertisedProduct"],
+                    "groupBy": group_by,
                     "columns": columns,
                     "reportTypeId": "spAdvertisedProduct",
                     "timeUnit": "DAILY",
@@ -594,6 +605,34 @@ def sync_asin_report(session, headers, d_str, columns=None, sales_keys=None, ord
                     )
             errors.append(f"ASIN {d_str} invalid columns")
             return errors
+        elif (
+            allow_retry
+            and req.status_code == 400
+            and "groupby" in req.text.lower()
+            and "allowed values" in req.text.lower()
+        ):
+            allowed = _parse_allowed_columns(req.text)
+            if allowed:
+                return sync_asin_report(
+                    session,
+                    headers,
+                    d_str,
+                    columns=columns,
+                    sales_keys=sales_keys,
+                    orders_keys=orders_keys,
+                    allow_retry=False,
+                    group_by=[allowed[0]],
+                )
+            return sync_asin_report(
+                session,
+                headers,
+                d_str,
+                columns=columns,
+                sales_keys=sales_keys,
+                orders_keys=orders_keys,
+                allow_retry=False,
+                group_by=["advertiser"],
+            )
         else:
             rid = None
             errors.append(f"ASIN {d_str} create failed {req.status_code}: {req.text[:200]}")

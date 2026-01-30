@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 
 from .amazon_api import (
+    create_sp_keywords,
     create_sp_negative_keywords,
     get_amazon_session_and_headers,
     get_row_value,
@@ -89,6 +90,7 @@ def _chunked(items, size=100):
 
 INVALID_COLUMNS_ERROR = "columns includes invalid values"
 AUTO_NEGATIVE_PENDING_KEY = "auto_negative_pending_report"
+AUTO_KEYWORD_PENDING_KEY = "auto_keyword_pending_report"
 SEARCH_COST_KEYS = ["cost", "spend"]
 SEARCH_SALES_KEYS = [
     "sales7d",
@@ -238,8 +240,10 @@ def _wait_for_report(session, headers, report_id, max_polls=10):
     return None, "pending"
 
 
-def _load_pending_report():
-    raw = get_system_value(AUTO_NEGATIVE_PENDING_KEY)
+def _load_pending_report(key=None):
+    if not key:
+        key = AUTO_NEGATIVE_PENDING_KEY
+    raw = get_system_value(key)
     if not raw:
         return None
     try:
@@ -249,7 +253,9 @@ def _load_pending_report():
     return payload if isinstance(payload, dict) else None
 
 
-def _save_pending_report(report_id, start_date, end_date, sales_keys, orders_keys):
+def _save_pending_report(report_id, start_date, end_date, sales_keys, orders_keys, key=None):
+    if not key:
+        key = AUTO_NEGATIVE_PENDING_KEY
     payload = {
         "report_id": report_id,
         "start": start_date,
@@ -258,11 +264,13 @@ def _save_pending_report(report_id, start_date, end_date, sales_keys, orders_key
         "orders_keys": orders_keys,
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-    set_system_value(AUTO_NEGATIVE_PENDING_KEY, json.dumps(payload))
+    set_system_value(key, json.dumps(payload))
 
 
-def _clear_pending_report():
-    set_system_value(AUTO_NEGATIVE_PENDING_KEY, "")
+def _clear_pending_report(key=None):
+    if not key:
+        key = AUTO_NEGATIVE_PENDING_KEY
+    set_system_value(key, "")
 
 
 def _get_auto_negative_config(cfg):
@@ -295,6 +303,30 @@ def _normalize_negative_match(match_type):
     if mt in ["NEGATIVEPHRASE"]:
         return "NEGATIVE_PHRASE"
     return mt
+
+
+def _normalize_positive_match(match_type):
+    if not match_type:
+        return ""
+    mt = str(match_type).strip().upper()
+    if mt in ["EXACT", "PHRASE", "BROAD"]:
+        return mt
+    if mt in ["EXACT_MATCH"]:
+        return "EXACT"
+    if mt in ["PHRASE_MATCH"]:
+        return "PHRASE"
+    if mt in ["BROAD_MATCH"]:
+        return "BROAD"
+    return mt
+
+
+def _is_asin_term(term):
+    t = str(term or "").strip().upper()
+    if len(t) != 10:
+        return False
+    if not re.match(r"^[A-Z0-9]{10}$", t):
+        return False
+    return t.startswith("B")
 
 
 def _parse_protect_terms(raw):
@@ -515,12 +547,15 @@ def run_optimization_logic(
         allowed_campaign_ids = None
         campaign_name_map = {}
         if whitelist:
+            whitelist_set = {str(w).strip() for w in whitelist if str(w).strip()}
             for c in campaigns:
                 campaign_id = c.get("campaignId", c.get("campaign_id"))
                 if campaign_id is None:
                     continue
                 campaign_name_map[str(campaign_id)] = str(c.get("name", "")).strip()
-            allowed_campaign_ids = {cid for cid, name in campaign_name_map.items() if name in whitelist}
+            allowed_campaign_ids = {
+                cid for cid, name in campaign_name_map.items() if cid in whitelist_set or name in whitelist_set
+            }
             if not allowed_campaign_ids:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 reason = f"未匹配到白名单活动: {', '.join(whitelist)}"
@@ -1199,6 +1234,412 @@ def run_optimization_logic(
                         )
                         conn.commit()
                     set_system_value(AUTO_NEGATIVE_LAST_RUN_KEY, ts)
+
+        # === 自动投词/拓词：基于搜索词表现 ===
+        auto_expand_enabled = bool(allowed_campaign_ids) if whitelist else False
+        if auto_expand_enabled:
+            expand_days = 7
+            expand_min_clicks = 4
+            expand_min_orders = 1
+            expand_strong_clicks = 6
+            expand_strong_orders = 2
+            expand_max_new = None
+            expand_acos_factor = 1.2
+            expand_strong_acos_factor = 0.8
+            expand_allow_broad = True
+
+            end_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+            start_date = (today - timedelta(days=expand_days)).strftime("%Y-%m-%d")
+
+            data = None
+            sales_keys = []
+            orders_keys = []
+            pending = _load_pending_report(AUTO_KEYWORD_PENDING_KEY)
+
+            if (
+                pending
+                and pending.get("report_id")
+                and pending.get("start") == start_date
+                and pending.get("end") == end_date
+            ):
+                sales_keys = pending.get("sales_keys") or []
+                orders_keys = pending.get("orders_keys") or []
+                data, err = _check_report_once(session, headers, pending.get("report_id"))
+                if err == "pending":
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    reason = f"投词报告生成中: {pending.get('report_id')}"
+                    logs.append(
+                        {
+                            "时间": ts,
+                            "广告": "系统",
+                            "类型": "投词",
+                            "动作": "SP 自动投词",
+                            "原值": 0,
+                            "新值": 0,
+                            "原因": reason,
+                        }
+                    )
+                    with db_write_lock():
+                        conn.execute(
+                            "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                            (ts, "系统", "SP 自动投词", 0, 0, reason, "模拟"),
+                        )
+                        conn.commit()
+                    data = None
+                elif err:
+                    _clear_pending_report(AUTO_KEYWORD_PENDING_KEY)
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    reason = f"投词报告失败: {err}"
+                    logs.append(
+                        {
+                            "时间": ts,
+                            "广告": "系统",
+                            "类型": "投词",
+                            "动作": "SP 自动投词",
+                            "原值": 0,
+                            "新值": 0,
+                            "原因": reason,
+                        }
+                    )
+                    with db_write_lock():
+                        conn.execute(
+                            "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                            (ts, "系统", "SP 自动投词", 0, 0, reason, "失败"),
+                        )
+                        conn.commit()
+                    data = None
+                else:
+                    _clear_pending_report(AUTO_KEYWORD_PENDING_KEY)
+            else:
+                if pending:
+                    _clear_pending_report(AUTO_KEYWORD_PENDING_KEY)
+                report_id, sales_keys, orders_keys, err = _fetch_search_term_report(
+                    session, headers, start_date, end_date
+                )
+                if err:
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    reason = f"投词报告失败: {err}"
+                    logs.append(
+                        {
+                            "时间": ts,
+                            "广告": "系统",
+                            "类型": "投词",
+                            "动作": "SP 自动投词",
+                            "原值": 0,
+                            "新值": 0,
+                            "原因": reason,
+                        }
+                    )
+                    with db_write_lock():
+                        conn.execute(
+                            "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                            (ts, "系统", "SP 自动投词", 0, 0, reason, "失败"),
+                        )
+                        conn.commit()
+                    data = None
+                else:
+                    data, err = _wait_for_report(session, headers, report_id, max_polls=10)
+                    if err == "pending":
+                        _save_pending_report(
+                            report_id, start_date, end_date, sales_keys, orders_keys, key=AUTO_KEYWORD_PENDING_KEY
+                        )
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        reason = f"投词报告生成中: {report_id}"
+                        logs.append(
+                            {
+                                "时间": ts,
+                                "广告": "系统",
+                                "类型": "投词",
+                                "动作": "SP 自动投词",
+                                "原值": 0,
+                                "新值": 0,
+                                "原因": reason,
+                            }
+                        )
+                        with db_write_lock():
+                            conn.execute(
+                                "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                                (ts, "系统", "SP 自动投词", 0, 0, reason, "模拟"),
+                            )
+                            conn.commit()
+                        data = None
+                    elif err:
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        reason = f"投词报告失败: {err}"
+                        logs.append(
+                            {
+                                "时间": ts,
+                                "广告": "系统",
+                                "类型": "投词",
+                                "动作": "SP 自动投词",
+                                "原值": 0,
+                                "新值": 0,
+                                "原因": reason,
+                            }
+                        )
+                        with db_write_lock():
+                            conn.execute(
+                                "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                                (ts, "系统", "SP 自动投词", 0, 0, reason, "失败"),
+                            )
+                            conn.commit()
+                        data = None
+                    else:
+                        _clear_pending_report(AUTO_KEYWORD_PENDING_KEY)
+
+            if data is None or data.empty:
+                if data is not None and data.empty:
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    reason = "投词报告为空"
+                    logs.append(
+                        {
+                            "时间": ts,
+                            "广告": "系统",
+                            "类型": "投词",
+                            "动作": "SP 自动投词",
+                            "原值": 0,
+                            "新值": 0,
+                            "原因": reason,
+                        }
+                    )
+                    with db_write_lock():
+                        conn.execute(
+                            "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                            (ts, "系统", "SP 自动投词", 0, 0, reason, "模拟" if not is_live_mode else "失败"),
+                        )
+                        conn.commit()
+            else:
+                data.columns = [c.lower() for c in data.columns]
+                sales_candidates = [k.lower() for k in (sales_keys or [])] + SEARCH_SALES_KEYS
+                order_candidates = [k.lower() for k in (orders_keys or [])] + SEARCH_ORDER_KEYS
+
+                records = []
+                for _, row in data.iterrows():
+                    search_term = row.get("searchterm") or row.get("search_term")
+                    if not search_term:
+                        continue
+                    ad_group_id = row.get("adgroupid") or row.get("ad_group_id")
+                    if not ad_group_id:
+                        continue
+                    campaign_id = row.get("campaignid") or row.get("campaign_id")
+                    if campaign_id is None or (isinstance(campaign_id, float) and pd.isna(campaign_id)):
+                        campaign_id = ""
+                    campaign_id = str(campaign_id or "")
+                    ad_group_id = str(ad_group_id or "")
+                    if not campaign_id:
+                        campaign_id = str(ad_group_campaign.get(ad_group_id, "") or "")
+                    if not campaign_id:
+                        continue
+                    if allowed_campaign_ids is not None and campaign_id not in allowed_campaign_ids:
+                        continue
+                    if enabled_ad_groups is not None and ad_group_id not in enabled_ad_groups:
+                        continue
+                    cost = get_row_value(row, SEARCH_COST_KEYS, 0)
+                    sales = get_row_value(row, sales_candidates, 0)
+                    orders = get_row_value(row, order_candidates, 0)
+                    clicks = get_row_value(row, ["clicks"], 0)
+                    impressions = get_row_value(row, ["impressions"], 0)
+                    records.append(
+                        {
+                            "campaign_id": str(campaign_id or ""),
+                            "ad_group_id": str(ad_group_id),
+                            "search_term": str(search_term).strip(),
+                            "cost": float(cost or 0),
+                            "sales": float(sales or 0),
+                            "orders": float(orders or 0),
+                            "clicks": float(clicks or 0),
+                            "impressions": float(impressions or 0),
+                        }
+                    )
+
+                if records:
+                    df_terms = pd.DataFrame(records)
+                    agg = (
+                        df_terms.groupby(["campaign_id", "ad_group_id", "search_term"], as_index=False)[
+                            ["cost", "sales", "orders", "clicks", "impressions"]
+                        ]
+                        .sum()
+                        .reset_index(drop=True)
+                    )
+                else:
+                    agg = pd.DataFrame()
+
+                if agg.empty:
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    reason = "投词报告无有效数据"
+                    logs.append(
+                        {
+                            "时间": ts,
+                            "广告": "系统",
+                            "类型": "投词",
+                            "动作": "SP 自动投词",
+                            "原值": 0,
+                            "新值": 0,
+                            "原因": reason,
+                        }
+                    )
+                    with db_write_lock():
+                        conn.execute(
+                            "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                            (ts, "系统", "SP 自动投词", 0, 0, reason, "模拟" if not is_live_mode else "失败"),
+                        )
+                        conn.commit()
+                else:
+                    existing_kw = set()
+                    existing_term_any = set()
+                    for kw in keywords:
+                        keyword_text = str(kw.get("keywordText") or "").strip()
+                        if not keyword_text:
+                            continue
+                        campaign_id = str(kw.get("campaignId") or kw.get("campaign_id") or "")
+                        ad_group_id = str(kw.get("adGroupId") or kw.get("ad_group_id") or "")
+                        if not campaign_id or not ad_group_id:
+                            continue
+                        match_type = _normalize_positive_match(kw.get("matchType"))
+                        if not match_type:
+                            continue
+                        existing_kw.add((campaign_id, ad_group_id, keyword_text.lower(), match_type))
+                        existing_term_any.add((campaign_id, ad_group_id, keyword_text.lower()))
+
+                    neg_terms = set()
+                    items = list_sp_campaign_negative_keywords(session, headers)
+                    for item in items:
+                        term = str(item.get("keywordText") or "").strip().lower()
+                        if not term:
+                            continue
+                        neg_terms.add((str(item.get("campaignId") or ""), "", term))
+                    items = list_sp_negative_keywords(session, headers)
+                    for item in items:
+                        term = str(item.get("keywordText") or "").strip().lower()
+                        if not term:
+                            continue
+                        neg_terms.add(
+                            (
+                                str(item.get("campaignId") or ""),
+                                str(item.get("adGroupId") or ""),
+                                term,
+                            )
+                        )
+
+                    payloads = []
+                    action_rows = []
+                    agg_sorted = agg.sort_values(["orders", "sales", "clicks"], ascending=False)
+                    for _, r in agg_sorted.iterrows():
+                        if expand_max_new is not None and len(payloads) >= expand_max_new:
+                            break
+                        term = str(r.get("search_term") or "").strip()
+                        if not term:
+                            continue
+                        if _is_asin_term(term):
+                            continue
+                        term_lower = term.lower()
+                        campaign_id = str(r.get("campaign_id") or "")
+                        ad_group_id = str(r.get("ad_group_id") or "")
+                        if not campaign_id:
+                            campaign_id = str(ad_group_campaign.get(ad_group_id, "") or "")
+                        if not campaign_id or not ad_group_id:
+                            continue
+                        if (campaign_id, ad_group_id, term_lower) in existing_term_any:
+                            continue
+                        if (campaign_id, "", term_lower) in neg_terms or (campaign_id, ad_group_id, term_lower) in neg_terms:
+                            continue
+                        cost = float(r.get("cost") or 0)
+                        sales = float(r.get("sales") or 0)
+                        orders = float(r.get("orders") or 0)
+                        clicks = float(r.get("clicks") or 0)
+                        if sales <= 0 or orders < expand_min_orders or clicks < expand_min_clicks:
+                            continue
+                        target_acos = base_target_acos
+                        rule = ad_group_map.get(ad_group_id)
+                        if rule and rule.get("target_acos"):
+                            target_acos = float(rule.get("target_acos") or base_target_acos)
+                        acos_pct = cost / sales * 100 if sales > 0 else 0
+                        if acos_pct > target_acos * expand_acos_factor:
+                            continue
+                        strong = (
+                            orders >= expand_strong_orders
+                            and clicks >= expand_strong_clicks
+                            and acos_pct <= target_acos * expand_strong_acos_factor
+                        )
+                        match_types = ["EXACT"]
+                        if expand_allow_broad:
+                            match_types.append("BROAD")
+                        if strong:
+                            match_types.append("PHRASE")
+                        avg_cpc = cost / clicks if clicks > 0 else base_max_bid * 0.6
+                        base_bid = max(MIN_BID, min(base_max_bid, avg_cpc * (1.2 if strong else 1.1)))
+                        for match_type in match_types:
+                            if expand_max_new is not None and len(payloads) >= expand_max_new:
+                                break
+                            key = (campaign_id, ad_group_id, term_lower, match_type)
+                            if key in existing_kw:
+                                continue
+                            payloads.append(
+                                {
+                                    "campaignId": campaign_id,
+                                    "adGroupId": ad_group_id,
+                                    "state": "ENABLED",
+                                    "keywordText": term,
+                                    "matchType": match_type,
+                                    "bid": round(base_bid, 2),
+                                }
+                            )
+                            existing_kw.add(key)
+                            action_rows.append(
+                                {
+                                    "term": term,
+                                    "campaign_id": campaign_id,
+                                    "ad_group_id": ad_group_id,
+                                    "bid": round(base_bid, 2),
+                                    "match_type": match_type,
+                                    "acos": acos_pct,
+                                    "orders": orders,
+                                    "clicks": clicks,
+                                }
+                            )
+
+                    if payloads:
+                        ok_all = True
+                        status = "模拟"
+                        if is_live_mode:
+                            for batch in _chunked(payloads, 100):
+                                ok, _ = create_sp_keywords(session, headers, batch)
+                                if not ok:
+                                    ok_all = False
+                            status = "已执行" if ok_all else "部分失败"
+
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        with db_write_lock():
+                            for row in action_rows:
+                                campaign_label = campaign_name_map.get(row["campaign_id"], row["campaign_id"])
+                                reason = (
+                                    f"投词: {row['match_type']} | {campaign_label}/{row['ad_group_id']} | "
+                                    f"ACOS {row['acos']:.1f}% 点击{int(row['clicks'])} 订单{int(row['orders'])}"
+                                )
+                                logs.append(
+                                    {
+                                        "时间": ts,
+                                        "广告": f"关键词:{row['term']}",
+                                        "类型": "投词",
+                                        "动作": "SP 自动投词",
+                                        "原值": 0,
+                                        "新值": row["bid"],
+                                        "原因": reason,
+                                    }
+                                )
+                                conn.execute(
+                                    "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                                    (
+                                        ts,
+                                        f"关键词:{row['term']}",
+                                        "SP 自动投词",
+                                        0,
+                                        row["bid"],
+                                        reason,
+                                        status,
+                                    ),
+                                )
+                            conn.commit()
 
     conn.commit()
     conn.close()
