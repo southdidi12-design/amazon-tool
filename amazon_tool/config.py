@@ -1,4 +1,4 @@
-import os
+﻿import os
 from datetime import datetime
 from pathlib import Path
 
@@ -26,10 +26,44 @@ AUTO_SYNC_REFRESH_DAYS = 2
 AUTO_AI_ENABLED_KEY = "auto_ai_enabled"
 AUTO_AI_TARGET_ACOS_KEY = "auto_ai_target_acos"
 AUTO_AI_MAX_BID_KEY = "auto_ai_max_bid"
+AUTO_AI_MIN_BID_KEY = "auto_ai_min_bid"
+AUTO_AI_MIN_BID_CLOSE_KEY = "auto_ai_min_bid_close"
+AUTO_AI_MIN_BID_LOOSE_KEY = "auto_ai_min_bid_loose"
+AUTO_AI_MIN_BID_SUB_KEY = "auto_ai_min_bid_sub"
+AUTO_AI_MIN_BID_COMP_KEY = "auto_ai_min_bid_comp"
+AUTO_AI_MAX_UP_PCT_KEY = "auto_ai_max_up_pct"
+AUTO_AI_BASELINE_MIN_KEY = "auto_ai_baseline_min_bid"
+AUTO_AI_MEMORY_FLOOR_RATIO_KEY = "auto_ai_memory_floor_ratio"
+AUTO_KEYWORD_POOL_ENABLED_KEY = "auto_keyword_pool_enabled"
+AUTO_KEYWORD_POOL_PATH_KEY = "auto_keyword_pool_path"
+AUTO_KEYWORD_POOL_DAILY_MAX_KEY = "auto_keyword_pool_daily_max"
+AUTO_KEYWORD_POOL_NEG_CLICKS_KEY = "auto_keyword_pool_neg_clicks"
+AUTO_KEYWORD_POOL_NEG_ORDERS_KEY = "auto_keyword_pool_neg_orders"
+AUTO_KEYWORD_POOL_MIN_FLOW_KEY = "auto_keyword_pool_min_flow"
 AUTO_AI_STOP_LOSS_KEY = "auto_ai_stop_loss"
 AUTO_AI_LIVE_KEY = "auto_ai_live"
 AUTO_AI_LAST_RUN_KEY = "auto_ai_last_run"
-AUTO_AI_CAMPAIGN_WHITELIST = ["176597893951887"]
+AUTO_AI_LEARNING_ENABLED_KEY = "auto_ai_learning_enabled"
+AUTO_AI_LEARNING_RATE_KEY = "auto_ai_learning_rate"
+AUTO_AI_LEARNING_LAST_DATE_KEY = "auto_ai_learning_last_date"
+AUTO_AI_LEARNING_NOTE_KEY = "auto_ai_learning_note"
+AUTO_AI_CAMPAIGN_WHITELIST = [
+    "176597893951887",  # existing managed campaign (3305)
+    "294775544176956",
+    "311991007657500",
+    "342291596465765",
+    "345874865906860",
+    "349858316916812",
+    "380577349173047",
+    "417056838439826",
+    "434286851324199",
+    "444508631053390",
+    "467301712320201",
+    "494059472666157",
+    "508946103570095",
+    "515049186715013",
+    "538987412589483",
+]
 AUTO_AI_CAMPAIGN_DAILY_BUDGET = 10.0
 AUTO_NEGATIVE_ENABLED_KEY = "auto_negative_enabled"
 AUTO_NEGATIVE_LEVEL_KEY = "auto_negative_level"
@@ -83,3 +117,4 @@ def get_auto_ai_campaign_daily_budget():
 
 def get_real_today():
     return datetime.now().date()
+

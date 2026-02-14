@@ -121,7 +121,7 @@ def get_media_headers(headers, media_type):
     return h
 
 
-def _post_list(session, headers, url, media_type, payload_key):
+def _post_list(session, headers, url, media_type, payload_key, alt_keys=None):
     h = get_media_headers(headers, media_type)
     items = []
     next_token = None
@@ -134,6 +134,12 @@ def _post_list(session, headers, url, media_type, payload_key):
             return items, res.status_code
         payload = res.json()
         batch = payload.get(payload_key, [])
+        if (not batch) and alt_keys:
+            for key in alt_keys:
+                alt_batch = payload.get(key, [])
+                if alt_batch:
+                    batch = alt_batch
+                    break
         if not isinstance(batch, list):
             batch = []
         items.extend(batch)
@@ -196,6 +202,7 @@ def list_sp_targets(session, headers):
         "https://advertising-api.amazon.com/sp/targets/list",
         TARGETING_MEDIA,
         "targets",
+        alt_keys=["targetingClauses"],
     )
     if status == 200 and items:
         return items
@@ -205,6 +212,7 @@ def list_sp_targets(session, headers):
         "https://advertising-api.amazon.com/sp/targetingClauses/list",
         TARGETING_MEDIA,
         "targetingClauses",
+        alt_keys=["targets"],
     )
     if status == 200:
         return items
@@ -303,16 +311,29 @@ def update_sp_target_bids(session, headers, updates):
                 errors.append(f"{res.status_code} {res.text}")
 
     if clauses:
-        payload = {"targetingClauses": clauses}
-        res = session.put(
-            "https://advertising-api.amazon.com/sp/targetingClauses", headers=h, json=payload, timeout=30
-        )
+        clause_payload = []
+        for c in clauses:
+            item = dict(c)
+            if "targetId" not in item and "targetingClauseId" in item:
+                item["targetId"] = item.pop("targetingClauseId")
+            clause_payload.append(item)
+        payload = {"targetingClauses": clause_payload}
+        res = session.put("https://advertising-api.amazon.com/sp/targets", headers=h, json=payload, timeout=30)
         if res.status_code not in [200, 207]:
-            res2 = session.put(
-                "https://advertising-api.amazon.com/sp/targetingClauses", headers=h, json=clauses, timeout=30
-            )
+            res2 = session.put("https://advertising-api.amazon.com/sp/targets", headers=h, json=payload, timeout=30)
             if res2.status_code not in [200, 207]:
-                errors.append(f"{res.status_code} {res.text}")
+                res3 = session.put(
+                    "https://advertising-api.amazon.com/sp/targetingClauses", headers=h, json=payload, timeout=30
+                )
+                if res3.status_code not in [200, 207]:
+                    res4 = session.put(
+                        "https://advertising-api.amazon.com/sp/targetingClauses",
+                        headers=h,
+                        json=clauses,
+                        timeout=30,
+                    )
+                    if res4.status_code not in [200, 207]:
+                        errors.append(f"{res.status_code} {res.text}")
 
     if errors:
         return False, " | ".join(errors)

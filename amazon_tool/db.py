@@ -135,6 +135,11 @@ def init_db():
             level TEXT, source TEXT, status TEXT, created_at TEXT, last_updated TEXT,
             PRIMARY KEY (campaign_id, ad_group_id, asin, expression_type, level, source))"""
     )
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS bid_baselines
+           (ad_group_id TEXT PRIMARY KEY, ad_group_name TEXT, baseline_bid REAL,
+            keyword_median REAL, target_median REAL, auto_median REAL, updated_at TEXT)"""
+    )
 
     # 补丁：防止旧数据库没有新增字段
     try:
@@ -209,6 +214,45 @@ def set_sync_status(status, detail=None, days=None):
         set_system_value(SYNC_ERROR_KEY, detail[:1000])
     if days is not None:
         set_system_value(SYNC_DAYS_KEY, str(days))
+
+
+def get_bid_baselines():
+    conn = get_db_connection()
+    try:
+        df = pd.read_sql("SELECT ad_group_id, baseline_bid FROM bid_baselines", conn)
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+    if df.empty:
+        return {}
+    df["ad_group_id"] = df["ad_group_id"].fillna("").astype(str)
+    df["baseline_bid"] = df["baseline_bid"].fillna(0.0)
+    return dict(zip(df["ad_group_id"], df["baseline_bid"]))
+
+
+def save_bid_baselines(records):
+    if not records:
+        return
+    with db_write_lock():
+        conn = get_db_connection()
+        try:
+            for rec in records:
+                conn.execute(
+                    "INSERT OR REPLACE INTO bid_baselines VALUES (?,?,?,?,?,?,?)",
+                    (
+                        rec.get("ad_group_id"),
+                        rec.get("ad_group_name"),
+                        rec.get("baseline_bid"),
+                        rec.get("keyword_median"),
+                        rec.get("target_median"),
+                        rec.get("auto_median"),
+                        rec.get("updated_at"),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def get_latest_report_date():

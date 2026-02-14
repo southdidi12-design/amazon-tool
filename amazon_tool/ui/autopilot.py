@@ -1,13 +1,24 @@
-import pandas as pd
+﻿import pandas as pd
 from datetime import datetime
 import streamlit as st
 
 from ..automation import run_optimization_logic
 from ..config import (
     AUTO_AI_ENABLED_KEY,
+    AUTO_AI_LEARNING_ENABLED_KEY,
+    AUTO_AI_LEARNING_NOTE_KEY,
+    AUTO_AI_LEARNING_RATE_KEY,
     AUTO_AI_LAST_RUN_KEY,
     AUTO_AI_LIVE_KEY,
     AUTO_AI_MAX_BID_KEY,
+    AUTO_AI_MAX_UP_PCT_KEY,
+    AUTO_AI_BASELINE_MIN_KEY,
+    AUTO_AI_MEMORY_FLOOR_RATIO_KEY,
+    AUTO_AI_MIN_BID_CLOSE_KEY,
+    AUTO_AI_MIN_BID_COMP_KEY,
+    AUTO_AI_MIN_BID_KEY,
+    AUTO_AI_MIN_BID_LOOSE_KEY,
+    AUTO_AI_MIN_BID_SUB_KEY,
     AUTO_AI_STOP_LOSS_KEY,
     AUTO_AI_TARGET_ACOS_KEY,
     AUTO_NEGATIVE_ACOS_MULT_KEY,
@@ -89,12 +100,38 @@ def render_autopilot_tab(deepseek_key):
         default_stop_loss = _get_float_setting(AUTO_AI_STOP_LOSS_KEY, 15.0)
 
         target_default = int(min(max(default_target, 10), 60))
-        max_bid_default = float(min(max(default_max_bid, 1.0), 10.0))
+        max_bid_default = float(min(max(default_max_bid, 0.02), 10.0))
         stop_loss_default = float(min(max(default_stop_loss, 1.0), 100.0))
 
         target_acos = st.slider("目标 ACOS (%)", 10, 60, target_default)
-        max_bid = st.number_input("最高出价 ($)", 1.0, 10.0, max_bid_default)
+        max_bid = st.number_input("最高出价 ($)", 0.02, 10.0, max_bid_default)
         stop_loss = st.number_input("止损阈值 ($/7天)", 1.0, 100.0, stop_loss_default)
+        default_min_bid = _get_float_setting(AUTO_AI_MIN_BID_KEY, 0.2)
+        default_min_close = _get_float_setting(AUTO_AI_MIN_BID_CLOSE_KEY, max(default_min_bid, 0.3))
+        default_min_loose = _get_float_setting(AUTO_AI_MIN_BID_LOOSE_KEY, max(default_min_bid, 0.25))
+        default_min_sub = _get_float_setting(AUTO_AI_MIN_BID_SUB_KEY, max(default_min_bid, 0.2))
+        default_min_comp = _get_float_setting(AUTO_AI_MIN_BID_COMP_KEY, max(default_min_bid, 0.15))
+        default_up_pct = _get_float_setting(AUTO_AI_MAX_UP_PCT_KEY, 100.0)
+        default_baseline_min = _get_float_setting(AUTO_AI_BASELINE_MIN_KEY, 0.5)
+        default_memory_ratio = _get_float_setting(AUTO_AI_MEMORY_FLOOR_RATIO_KEY, 0.9)
+        if default_memory_ratio <= 1:
+            default_memory_ratio = default_memory_ratio * 100
+        if default_up_pct <= 3:
+            default_up_pct = default_up_pct * 100
+        st.markdown("##### 出价下限 / 爬坡")
+        min_bid = st.number_input("通用最低出价 ($)", 0.02, 10.0, float(min(default_min_bid, 10.0)))
+        c1, c2 = st.columns(2)
+        with c1:
+            min_close = st.number_input("自动-紧密最低出价 ($)", 0.02, 10.0, float(min(default_min_close, 10.0)))
+            min_sub = st.number_input("自动-替代最低出价 ($)", 0.02, 10.0, float(min(default_min_sub, 10.0)))
+        with c2:
+            min_loose = st.number_input("自动-宽泛最低出价 ($)", 0.02, 10.0, float(min(default_min_loose, 10.0)))
+            min_comp = st.number_input("自动-互补最低出价 ($)", 0.02, 10.0, float(min(default_min_comp, 10.0)))
+        max_up_pct = st.slider("每次上调上限 (%)", 10, 300, int(min(default_up_pct, 300)))
+        st.markdown("##### 记忆价保护")
+        baseline_min_bid = st.number_input("记忆价最低保护 ($)", 0.02, 10.0, float(min(default_baseline_min, 10.0)))
+        memory_ratio = st.slider("记忆价保护比例 (%)", 50, 100, int(min(default_memory_ratio, 100)))
+        st.caption("用于分步抬价，避免一次性拉升。")
         mode = st.radio("模式", ["🧪 模拟", "🔥 实弹"])
         st.caption("实弹将调整 SP 关键词/投放/广告位倍率；不修改活动预算。")
 
@@ -111,12 +148,20 @@ def render_autopilot_tab(deepseek_key):
         st.markdown("#### 🤖 自动驾驶")
         auto_enabled = _get_bool_setting(AUTO_AI_ENABLED_KEY, False)
         auto_live = _get_bool_setting(AUTO_AI_LIVE_KEY, False)
+        learn_enabled = _get_bool_setting(AUTO_AI_LEARNING_ENABLED_KEY, True)
+        learn_rate = _get_float_setting(AUTO_AI_LEARNING_RATE_KEY, 1.0)
+        learn_rate = max(0.5, min(learn_rate, 2.0))
         auto_enabled = st.checkbox("自动驾驶开启", value=auto_enabled)
         auto_live = st.checkbox("自动驾驶实弹", value=auto_live)
+        learn_enabled = st.checkbox("持续学习开启", value=learn_enabled)
+        learn_rate = st.slider("学习强度 (%)", 50, 200, int(learn_rate * 100))
         st.caption("自动驾驶需要配合计划任务运行（脚本: scripts/install_autopilot_task.ps1）。")
         last_run = get_system_value(AUTO_AI_LAST_RUN_KEY)
         if last_run:
             st.caption(f"自动驾驶最近运行: {last_run}")
+        learn_note = get_system_value(AUTO_AI_LEARNING_NOTE_KEY)
+        if learn_note:
+            st.caption(f"持续学习最近动作: {learn_note}")
 
         st.markdown("#### 🚫 自动否词")
         neg_enabled = st.checkbox("自动否词开启", value=neg_enabled)
@@ -162,8 +207,18 @@ def render_autopilot_tab(deepseek_key):
         if st.button("💾 保存自动驾驶设置", use_container_width=True):
             set_system_value(AUTO_AI_ENABLED_KEY, "1" if auto_enabled else "0")
             set_system_value(AUTO_AI_LIVE_KEY, "1" if auto_live else "0")
+            set_system_value(AUTO_AI_LEARNING_ENABLED_KEY, "1" if learn_enabled else "0")
+            set_system_value(AUTO_AI_LEARNING_RATE_KEY, str(learn_rate / 100.0))
             set_system_value(AUTO_AI_TARGET_ACOS_KEY, str(target_acos))
             set_system_value(AUTO_AI_MAX_BID_KEY, str(max_bid))
+            set_system_value(AUTO_AI_MIN_BID_KEY, str(min_bid))
+            set_system_value(AUTO_AI_MIN_BID_CLOSE_KEY, str(min_close))
+            set_system_value(AUTO_AI_MIN_BID_LOOSE_KEY, str(min_loose))
+            set_system_value(AUTO_AI_MIN_BID_SUB_KEY, str(min_sub))
+            set_system_value(AUTO_AI_MIN_BID_COMP_KEY, str(min_comp))
+            set_system_value(AUTO_AI_MAX_UP_PCT_KEY, str(max_up_pct))
+            set_system_value(AUTO_AI_BASELINE_MIN_KEY, str(baseline_min_bid))
+            set_system_value(AUTO_AI_MEMORY_FLOOR_RATIO_KEY, str(memory_ratio))
             set_system_value(AUTO_AI_STOP_LOSS_KEY, str(stop_loss))
             set_system_value(AUTO_NEGATIVE_ENABLED_KEY, "1" if neg_enabled else "0")
             set_system_value(
@@ -296,3 +351,4 @@ def render_autopilot_tab(deepseek_key):
         except Exception:
             pass
         conn.close()
+
