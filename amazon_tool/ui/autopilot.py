@@ -320,6 +320,13 @@ def render_autopilot_tab():
                 max_campaigns = st.slider("最多活动数", 5, 80, 20)
             with ac3:
                 apply_live = st.checkbox("直接下发到Amazon", value=False)
+            confirm_token = "APPLY"
+            confirm_text = st.text_input(
+                "实盘确认口令",
+                value="",
+                placeholder=f"输入 {confirm_token} 才能实盘下发",
+                help="防止误操作：仅当勾选“直接下发到Amazon”且输入确认口令后才会执行",
+            )
 
             plan_df, updates = _build_bid_updates_from_recommendations(
                 rec_df,
@@ -338,6 +345,9 @@ def render_autopilot_tab():
                     if not apply_live:
                         st.success(f"模拟完成：共 {len(updates)} 条（未下发Amazon）")
                     else:
+                        if confirm_text.strip().upper() != confirm_token:
+                            st.warning(f"实盘下发已拦截：请输入确认口令 {confirm_token}")
+                            return
                         session, headers = get_amazon_session_and_headers()
                         if not session:
                             st.error("未检测到Amazon API配置，无法下发")
