@@ -237,7 +237,15 @@ def _render_sidebar_panel():
         )
 
         st.markdown("#### 🔄 数据同步")
-        if st.button("🚀 立即同步最近 7 天", type="primary", use_container_width=True):
+        current_sync_status = (get_system_value(SYNC_STATUS_KEY) or "").strip().lower()
+        sync_is_running = current_sync_status in {"running", "busy"}
+        if st.button(
+            "🚀 立即同步最近 7 天",
+            type="primary",
+            use_container_width=True,
+            disabled=sync_is_running,
+            help="后台同步进行中，请稍后再试" if sync_is_running else None,
+        ):
             with st.status("正在同步数据...", expanded=True) as sync_status_ui:
                 ok = run_sync_task_guarded(7, sync_status_ui)
                 if ok:
@@ -264,6 +272,8 @@ def _render_sidebar_panel():
         latest_report = get_latest_report_date() or "暂无"
         hours = max(1, int(AUTO_SYNC_INTERVAL_SECONDS / 3600))
         st.caption(f"自动同步频率: 每 {hours} 小时回补最近 {AUTO_SYNC_REFRESH_DAYS} 天")
+        if sync_is_running:
+            st.caption("当前状态: 正在后台同步中，请等待完成")
         st.caption(f"最近同步时间: {last_sync_ts}")
         st.caption(f"同步状态: {sync_status} (天数: {sync_days})")
         st.caption(f"最新数据日期: {latest_report}")
