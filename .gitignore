@@ -4,3 +4,4 @@ reports/
 *.db-wal
 *.db-shm
 db_path.txt
+.venv_mac/
