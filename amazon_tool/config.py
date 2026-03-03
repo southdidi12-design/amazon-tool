@@ -26,6 +26,7 @@ AUTO_SYNC_REFRESH_DAYS = 2
 AUTO_AI_ENABLED_KEY = "auto_ai_enabled"
 AUTO_AI_TARGET_ACOS_KEY = "auto_ai_target_acos"
 AUTO_AI_MAX_BID_KEY = "auto_ai_max_bid"
+AUTO_AI_HARVEST_MIN_ORDERS_KEY = "auto_ai_harvest_min_orders"
 AUTO_AI_MIN_BID_KEY = "auto_ai_min_bid"
 AUTO_AI_MIN_BID_CLOSE_KEY = "auto_ai_min_bid_close"
 AUTO_AI_MIN_BID_LOOSE_KEY = "auto_ai_min_bid_loose"
@@ -63,6 +64,11 @@ AUTO_AI_CAMPAIGN_WHITELIST = [
     "508946103570095",
     "515049186715013",
     "538987412589483",
+    # Added 3305 campaigns to bring high-ACOS non-managed traffic under AI control
+    "477404577922959",
+    "558893454246057",
+    "277059222932077",
+    "292545543361874",
 ]
 AUTO_AI_CAMPAIGN_DAILY_BUDGET = 10.0
 AUTO_NEGATIVE_ENABLED_KEY = "auto_negative_enabled"

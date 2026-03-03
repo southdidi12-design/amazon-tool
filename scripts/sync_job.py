@@ -101,6 +101,9 @@ FALLBACK_ORDER_KEYS = [
 ]
 ASIN_ID_CANDIDATES = ["advertisedAsin", "asin"]
 ASIN_SKU_CANDIDATES = ["advertisedSku", "sku"]
+REPORT_CREATE_MAX_RETRIES = 5
+REPORT_CREATE_BACKOFF_BASE_SECONDS = 2
+REPORT_CREATE_BACKOFF_MAX_SECONDS = 60
 
 
 def _dedupe(items):
@@ -112,6 +115,57 @@ def _dedupe(items):
         seen.add(item)
         out.append(item)
     return out
+
+
+def _to_positive_int(value):
+    try:
+        parsed = int(float(str(value).strip()))
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return None
+
+
+def _extract_retry_after_seconds(resp, fallback_seconds):
+    try:
+        header_wait = _to_positive_int(resp.headers.get("Retry-After"))
+        if header_wait:
+            return header_wait
+    except Exception:
+        pass
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict):
+        for key in ["retryAfterSeconds", "retryAfter", "retry_after_seconds", "retry_after"]:
+            body_wait = _to_positive_int(payload.get(key))
+            if body_wait:
+                return body_wait
+    return fallback_seconds
+
+
+def _post_report_with_throttle_retry(session, headers, payload):
+    response = None
+    for attempt in range(REPORT_CREATE_MAX_RETRIES + 1):
+        response = session.post(
+            "https://advertising-api.amazon.com/reporting/reports",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        if response.status_code != 429:
+            return response
+        if attempt >= REPORT_CREATE_MAX_RETRIES:
+            break
+        fallback_wait = min(
+            REPORT_CREATE_BACKOFF_MAX_SECONDS,
+            REPORT_CREATE_BACKOFF_BASE_SECONDS * (2**attempt),
+        )
+        wait_seconds = _extract_retry_after_seconds(response, fallback_wait)
+        time.sleep(max(1, wait_seconds))
+    return response
 
 
 def _parse_allowed_columns(text):
@@ -657,10 +711,10 @@ def sync_campaign_report(
     allow_retry=True,
 ):
     try:
-        req = session.post(
-            "https://advertising-api.amazon.com/reporting/reports",
-            headers=headers,
-            json={
+        req = _post_report_with_throttle_retry(
+            session,
+            headers,
+            {
                 "startDate": d_str,
                 "endDate": d_str,
                 "configuration": {
@@ -672,7 +726,6 @@ def sync_campaign_report(
                     "format": "GZIP_JSON",
                 },
             },
-            timeout=30,
         )
         if req.status_code in [200, 201, 202]:
             rid = req.json().get("reportId")
@@ -703,6 +756,7 @@ def sync_campaign_report(
         else:
             return False, f"{ad_product} {d_str} create failed {req.status_code}: {req.text[:200]}"
         if rid:
+            poll_wait_seconds = REPORT_POLL_SLEEP_SECONDS
             for _ in range(REPORT_POLL_MAX):
                 time.sleep(REPORT_POLL_SLEEP_SECONDS)
                 chk = session.get(
@@ -710,9 +764,17 @@ def sync_campaign_report(
                     headers=headers,
                     timeout=30,
                 )
-                status = chk.json().get("status")
+                if chk.status_code == 429:
+                    time.sleep(poll_wait_seconds)
+                    poll_wait_seconds = min(REPORT_CREATE_BACKOFF_MAX_SECONDS, max(1, poll_wait_seconds * 2))
+                    continue
+                poll_wait_seconds = REPORT_POLL_SLEEP_SECONDS
+                if chk.status_code >= 500:
+                    continue
+                chk_payload = chk.json()
+                status = chk_payload.get("status")
                 if status == "COMPLETED":
-                    url = chk.json().get("url")
+                    url = chk_payload.get("url")
                     if url:
                         data = pd.read_json(url, compression="gzip")
                         if not data.empty:
@@ -772,10 +834,10 @@ def sync_asin_report(session, headers, d_str, columns=None, sales_keys=None, ord
 
     errors = []
     try:
-        req = session.post(
-            "https://advertising-api.amazon.com/reporting/reports",
-            headers=headers,
-            json={
+        req = _post_report_with_throttle_retry(
+            session,
+            headers,
+            {
                 "startDate": d_str,
                 "endDate": d_str,
                 "configuration": {
@@ -787,7 +849,6 @@ def sync_asin_report(session, headers, d_str, columns=None, sales_keys=None, ord
                     "format": "GZIP_JSON",
                 },
             },
-            timeout=30,
         )
         if req.status_code in [200, 201, 202]:
             rid = req.json().get("reportId")
@@ -818,6 +879,7 @@ def sync_asin_report(session, headers, d_str, columns=None, sales_keys=None, ord
             errors.append(f"ASIN {d_str} create failed {req.status_code}: {req.text[:200]}")
 
         if rid:
+            poll_wait_seconds = REPORT_POLL_SLEEP_SECONDS
             for _ in range(REPORT_POLL_MAX):
                 time.sleep(REPORT_POLL_SLEEP_SECONDS)
                 chk = session.get(
@@ -825,9 +887,17 @@ def sync_asin_report(session, headers, d_str, columns=None, sales_keys=None, ord
                     headers=headers,
                     timeout=30,
                 )
-                status = chk.json().get("status")
+                if chk.status_code == 429:
+                    time.sleep(poll_wait_seconds)
+                    poll_wait_seconds = min(REPORT_CREATE_BACKOFF_MAX_SECONDS, max(1, poll_wait_seconds * 2))
+                    continue
+                poll_wait_seconds = REPORT_POLL_SLEEP_SECONDS
+                if chk.status_code >= 500:
+                    continue
+                chk_payload = chk.json()
+                status = chk_payload.get("status")
                 if status == "COMPLETED":
-                    url = chk.json().get("url")
+                    url = chk_payload.get("url")
                     if url:
                         data = pd.read_json(url, compression="gzip")
                         if not data.empty:

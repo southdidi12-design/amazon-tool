@@ -18,6 +18,7 @@ from .amazon_api import (
     list_sp_negative_targets,
     list_sp_negative_keywords,
     list_sp_targets,
+    update_campaign_budget,
     update_sp_adgroup_bids,
     update_sp_campaign_bidding,
     update_sp_keyword_bids,
@@ -34,6 +35,7 @@ from .config import (
     AUTO_AI_LEARNING_LAST_DATE_KEY,
     AUTO_AI_LEARNING_NOTE_KEY,
     AUTO_AI_LEARNING_RATE_KEY,
+    AUTO_AI_HARVEST_MIN_ORDERS_KEY,
     AUTO_AI_MAX_BID_KEY,
     AUTO_AI_MAX_UP_PCT_KEY,
     AUTO_AI_BASELINE_MIN_KEY,
@@ -74,7 +76,7 @@ from .db import (
     update_auto_negative_status,
     update_negative_product_status,
 )
-from .sync import sync_asin_report, sync_product_ads, sync_sp_adgroups
+from .sync import sync_asin_report, sync_campaign_report, sync_product_ads, sync_sp_adgroups
 
 # --- 2. DeepSeek AI ---
 try:
@@ -599,6 +601,62 @@ def _evaluate_scale_up_gate(conn, today, allowed_campaign_ids, target_acos_pct, 
     return True, f"放量开启（表现达标）| {summary}"
 
 
+def _extract_bucket_key(*texts):
+    for text in texts:
+        raw = str(text or "").strip()
+        if not raw:
+            continue
+        m = re.search(r"([0-9]{3,6}[A-Za-z]?)", raw)
+        if m:
+            return m.group(1).upper()
+    return ""
+
+
+def _detect_keyword_group_match_type(name):
+    n = str(name or "").strip().lower()
+    if not n:
+        return ""
+    if ("精准" in n) or ("exact" in n):
+        return "EXACT"
+    if ("词组" in n) or ("phrase" in n):
+        return "PHRASE"
+    if ("广泛" in n) or ("宽泛" in n) or ("broad" in n):
+        return "BROAD"
+    return ""
+
+
+def _build_keyword_harvest_routes(ad_groups, campaign_name_map):
+    routes = {}
+    if ad_groups is None or ad_groups.empty:
+        return routes
+
+    seen = set()
+    for _, row in ad_groups.iterrows():
+        ad_group_id = str(row.get("ad_group_id") or "").strip()
+        campaign_id = str(row.get("campaign_id") or "").strip()
+        ad_group_name = str(row.get("ad_group_name") or "").strip()
+        if not ad_group_id or not campaign_id:
+            continue
+        match_type = _detect_keyword_group_match_type(ad_group_name)
+        if not match_type:
+            continue
+        bucket = _extract_bucket_key(ad_group_name, campaign_name_map.get(campaign_id, ""))
+        if not bucket:
+            continue
+        key = (bucket, match_type, campaign_id, ad_group_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        routes.setdefault(bucket, {}).setdefault(match_type, []).append(
+            {
+                "campaign_id": campaign_id,
+                "ad_group_id": ad_group_id,
+                "ad_group_name": ad_group_name,
+            }
+        )
+    return routes
+
+
 def _run_continuous_learning(conn, logs, today, allowed_campaign_ids, base_target_acos, base_max_bid, base_stop_loss):
     if not _get_bool_setting(AUTO_AI_LEARNING_ENABLED_KEY, True):
         return
@@ -778,6 +836,44 @@ def _run_continuous_learning(conn, logs, today, allowed_campaign_ids, base_targe
         (ts, "系统", "AI 持续学习", max_bid, new_max_bid, note, status),
     )
 
+def _extract_campaign_budget_fields(campaign):
+    budget = campaign.get("budget")
+    budget_type = "DAILY"
+    if isinstance(budget, dict):
+        budget_type = str(budget.get("budgetType") or budget.get("type") or "DAILY").strip() or "DAILY"
+        budget = budget.get("budget")
+    elif isinstance(budget, (int, float)):
+        budget = float(budget)
+    else:
+        budget = campaign.get("dailyBudget", campaign.get("daily_budget", 0))
+    try:
+        budget_val = float(budget or 0)
+    except Exception:
+        budget_val = 0.0
+    return budget_val, budget_type
+
+
+def _load_today_campaign_spend(conn, day_str):
+    try:
+        df = pd.read_sql(
+            """
+            SELECT campaign_id, SUM(cost) AS cost
+            FROM campaign_reports
+            WHERE date = ? AND COALESCE(ad_type, 'SP') = 'SP'
+            GROUP BY campaign_id
+            """,
+            conn,
+            params=(day_str,),
+        )
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+    df["campaign_id"] = df["campaign_id"].fillna("").astype(str)
+    df["cost"] = pd.to_numeric(df["cost"], errors="coerce").fillna(0.0)
+    return dict(zip(df["campaign_id"], df["cost"]))
+
+
 def run_optimization_logic(
     base_target_acos, base_max_bid, base_stop_loss, is_live_mode, deepseek_key, auto_negative_config=None
 ):
@@ -805,6 +901,23 @@ def run_optimization_logic(
     except Exception:
         pass
     today = get_real_today()
+    today_str = today.strftime("%Y-%m-%d")
+    # Best-effort intraday SP campaign sync so budget pacing can react to today's spend speed.
+    try:
+        sync_campaign_report(
+            session,
+            headers,
+            "SPONSORED_PRODUCTS",
+            "spCampaigns",
+            ["campaignId", "campaignName", "cost", "sales1d", "clicks", "impressions", "purchases1d"],
+            "SP",
+            ["sales7d", "sales14d", "sales1d", "sales"],
+            ["purchases7d", "purchases14d", "purchases1d", "orders"],
+            today_str,
+            allow_retry=False,
+        )
+    except Exception:
+        pass
     max_acos = 30.0
     try:
         max_acos_setting = get_system_value("auto_ai_max_acos")
@@ -834,6 +947,10 @@ def run_optimization_logic(
     max_up_pct = max(0.0, min(max_up_pct, 5.0))
     start = (today - timedelta(days=7)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
+    simple_mode = True
+    harvest_min_orders = max(1, _get_int_setting(AUTO_AI_HARVEST_MIN_ORDERS_KEY, 1))
+    freeze_bid_updates = False
+    freeze_bid_reason = ""
 
     # 先确保 ASIN 报表有最近 7 天数据
     try:
@@ -903,6 +1020,8 @@ def run_optimization_logic(
             asin_perf["sku"] = asin_perf["sku"].fillna("").astype(str)
         else:
             asin_perf = pd.DataFrame(columns=["asin", "sku", "cost", "sales"])
+            freeze_bid_updates = True
+            freeze_bid_reason = "ASIN近7天花费数据不可用，保持原竞价投放"
 
         asin_data = pd.merge(settings_df, asin_perf, on=["asin", "sku"], how="left")
         asin_data["cost"] = asin_data["cost"].fillna(0.0)
@@ -995,7 +1114,10 @@ def run_optimization_logic(
                 asin_rules_by_asin[asin] = rule
 
         ads = pd.read_sql("SELECT ad_group_id, asin, sku, state FROM product_ads", conn)
-        ad_groups = pd.read_sql("SELECT ad_group_id, campaign_id, default_bid, state FROM ad_group_settings", conn)
+        ad_groups = pd.read_sql(
+            "SELECT ad_group_id, campaign_id, ad_group_name, default_bid, state FROM ad_group_settings",
+            conn,
+        )
         campaigns = list_sp_campaigns(session, headers, include_extended=True)
 
         whitelist = [w.strip() for w in get_auto_ai_campaign_whitelist() if str(w).strip()]
@@ -1034,13 +1156,21 @@ def run_optimization_logic(
                 conn.close()
                 return logs
 
-        scale_up_allowed, scale_up_reason = _evaluate_scale_up_gate(
+        scale_up_allowed = True
+        scale_up_prefix = f"极简模式：仅执行 ACOS 调价 + 精准收词（订单≥{harvest_min_orders}）"
+        gate_allowed, gate_reason = _evaluate_scale_up_gate(
             conn,
             today,
             allowed_campaign_ids,
             float(base_target_acos),
             float(base_stop_loss),
         )
+        if simple_mode:
+            scale_up_allowed = gate_allowed
+            scale_up_reason = f"{scale_up_prefix} | {gate_reason}"
+        else:
+            scale_up_allowed = gate_allowed
+            scale_up_reason = gate_reason
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logs.append(
             {
@@ -1072,6 +1202,8 @@ def run_optimization_logic(
         pool_enabled = False
         if pool_enabled_setting is not None:
             pool_enabled = str(pool_enabled_setting).strip().lower() in ["1", "true", "yes", "on"]
+        if simple_mode:
+            pool_enabled = False
         pool_path = get_system_value(AUTO_KEYWORD_POOL_PATH_KEY)
         if not pool_path:
             pool_path = os.path.join(str(BASE_DIR), "prd_docs", "amazon-keyword-clean", "output.csv")
@@ -1110,33 +1242,126 @@ def run_optimization_logic(
             pool_terms = set()
 
         if whitelist and campaigns:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            reason = "预算锁定：自动驾驶不会修改活动预算"
-            logs.append(
-                {
-                    "时间": ts,
-                    "广告": "系统",
-                    "类型": "预算",
-                    "动作": "SP 活动预算",
-                    "原价": 0,
-                    "新价": 0,
-                    "理由": reason,
-                }
-            )
-            with db_write_lock():
-                conn.execute(
-                    "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
-                    (ts, "系统", "SP 活动预算", 0, 0, reason, "锁定"),
+            spend_map = _load_today_campaign_spend(conn, today_str)
+            now_local = datetime.now()
+            elapsed_hours = now_local.hour + (now_local.minute / 60.0)
+            pace_hours = 22.0
+            elapsed_ratio = max(0.03, min(1.0, elapsed_hours / pace_hours))
+            if spend_map:
+                enabled_campaign_states = {"ENABLED", "ENABLED_WITH_PENDING_CHANGES"}
+                for campaign in campaigns:
+                    campaign_id = str(campaign.get("campaignId", campaign.get("campaign_id")) or "").strip()
+                    if not campaign_id:
+                        continue
+                    if allowed_campaign_ids is not None and campaign_id not in allowed_campaign_ids:
+                        continue
+                    state = str(campaign.get("state", "") or "").upper()
+                    if state and state not in enabled_campaign_states:
+                        continue
+                    old_budget, budget_type = _extract_campaign_budget_fields(campaign)
+                    if old_budget <= 0:
+                        continue
+                    spent_today = float(spend_map.get(campaign_id, -1))
+                    if spent_today < 0:
+                        continue
+
+                    expected_spend = max(0.01, old_budget * elapsed_ratio)
+                    fast_threshold = expected_spend * 1.12
+                    slow_threshold = expected_spend * 0.85
+                    budget_step = 0.0
+                    pace_note = ""
+
+                    if spent_today > fast_threshold:
+                        over_ratio = min(0.8, (spent_today / expected_spend) - 1.0)
+                        budget_step = -min(0.12, max(0.03, over_ratio * 0.25))
+                        pace_note = "花费偏快，微降预算"
+                    elif spent_today < slow_threshold and elapsed_ratio < 0.98:
+                        under_ratio = min(0.8, 1.0 - (spent_today / expected_spend))
+                        budget_step = min(0.12, max(0.03, under_ratio * 0.20))
+                        pace_note = "花费偏慢，微提预算"
+                    elif spent_today >= old_budget * 0.98 and elapsed_ratio < 0.95:
+                        budget_step = 0.08
+                        pace_note = "预算接近耗尽，提前补量"
+
+                    if abs(budget_step) < 1e-9:
+                        continue
+
+                    new_budget = old_budget * (1.0 + budget_step)
+                    min_budget = max(1.0, old_budget * 0.75)
+                    max_budget = old_budget * 1.25
+                    new_budget = round(max(min_budget, min(max_budget, new_budget)), 2)
+                    if abs(new_budget - old_budget) < 0.05:
+                        continue
+
+                    campaign_name = str(campaign.get("name", campaign.get("campaignName", campaign_id)) or campaign_id)
+                    reason = (
+                        f"22小时控速: {pace_note}; 今日花费 ${spent_today:.2f}, "
+                        f"当前时段应花 ${expected_spend:.2f} (已过 {elapsed_hours:.1f}h/22h)"
+                    )
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    logs.append(
+                        {
+                            "时间": ts,
+                            "广告": campaign_name,
+                            "类型": "预算",
+                            "动作": "SP 活动预算",
+                            "原价": old_budget,
+                            "新价": new_budget,
+                            "理由": reason,
+                        }
+                    )
+                    status = "模拟"
+                    if is_live_mode:
+                        ok, err = update_campaign_budget(
+                            session,
+                            headers,
+                            "SP",
+                            campaign_id,
+                            new_budget,
+                            budget_type,
+                        )
+                        status = "成功" if ok else "失败"
+                        if not ok and err:
+                            reason = f"{reason} | {err}"
+                    with db_write_lock():
+                        conn.execute(
+                            "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                            (ts, campaign_name, "SP 活动预算", old_budget, new_budget, reason, status),
+                        )
+                        conn.commit()
+            else:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                reason = "22小时控速：今天还没有可用的 SP 花费数据，暂不调预算"
+                logs.append(
+                    {
+                        "时间": ts,
+                        "广告": "系统",
+                        "类型": "预算",
+                        "动作": "SP 活动预算",
+                        "原价": 0,
+                        "新价": 0,
+                        "理由": reason,
+                    }
                 )
-                conn.commit()
+                with db_write_lock():
+                    conn.execute(
+                        "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                        (ts, "系统", "SP 活动预算", 0, 0, reason, "跳过"),
+                    )
+                    conn.commit()
 
         enabled_states = ["ENABLED", "ENABLED_WITH_PENDING_CHANGES"]
         ad_group_campaign = {}
         enabled_ad_groups = None
         ad_group_default_bid = {}
+        ad_group_name_map = {}
+        keyword_harvest_routes = {}
         if not ad_groups.empty:
             ad_groups["ad_group_id"] = ad_groups["ad_group_id"].fillna("").astype(str)
             ad_groups["campaign_id"] = ad_groups["campaign_id"].fillna("").astype(str)
+            if "ad_group_name" not in ad_groups.columns:
+                ad_groups["ad_group_name"] = ""
+            ad_groups["ad_group_name"] = ad_groups["ad_group_name"].fillna("").astype(str)
             ad_groups["default_bid"] = ad_groups["default_bid"].fillna(0.0)
             groups_state = ad_groups["state"].fillna("").astype(str).str.upper()
             ad_groups = ad_groups[(groups_state == "") | (groups_state.isin(enabled_states))]
@@ -1144,7 +1369,9 @@ def run_optimization_logic(
                 ad_groups = ad_groups[ad_groups["campaign_id"].isin(allowed_campaign_ids)]
             ad_group_campaign = dict(zip(ad_groups["ad_group_id"], ad_groups["campaign_id"]))
             ad_group_default_bid = dict(zip(ad_groups["ad_group_id"], ad_groups["default_bid"]))
+            ad_group_name_map = dict(zip(ad_groups["ad_group_id"], ad_groups["ad_group_name"]))
             enabled_ad_groups = set(ad_groups["ad_group_id"].tolist())
+            keyword_harvest_routes = _build_keyword_harvest_routes(ad_groups, campaign_name_map)
 
         campaign_rules = {}
         if allowed_campaign_ids is not None:
@@ -1401,12 +1628,16 @@ def run_optimization_logic(
         if not scale_up_allowed:
             gate_note = "放量暂停：仅允许维持或降价"
             for _, rule in ad_group_map.items():
+                rule["freeze_up"] = True
+                # Keep floor recovery active so very low bids can recover from penny-bid lock.
+                rule["freeze_floor"] = False
+                rule["force_floor"] = False
+                rule["max_up_pct"] = None
                 factor = float(rule.get("factor", 1.0) or 1.0)
                 if factor > 1.0:
                     rule["factor"] = 1.0
-                    rule["force_floor"] = False
-                    rule["max_up_pct"] = None
-                    reason = str(rule.get("reason") or "").strip()
+                reason = str(rule.get("reason") or "").strip()
+                if gate_note not in reason:
                     rule["reason"] = f"{reason} | {gate_note}" if reason else gate_note
 
         ad_group_campaign = dict(zip(ad_groups["ad_group_id"], ad_groups["campaign_id"]))
@@ -1535,8 +1766,11 @@ def run_optimization_logic(
             if allow_floor:
                 bid = max(bid, min_floor)
             cap_ratio = max_up_pct if up_cap is None else up_cap
-            if base_bid > 0 and cap_ratio > 0 and bid > base_bid:
+            floor_rescue = allow_floor and base_bid > 0 and min_floor > base_bid and bid >= min_floor
+            if base_bid > 0 and cap_ratio > 0 and bid > base_bid and not floor_rescue:
                 cap = base_bid * (1.0 + cap_ratio)
+                # Avoid no-op updates when tiny capped increases round back to the same 2-decimal bid.
+                cap = max(cap, base_bid + 0.01)
                 if bid > cap:
                     bid = cap
             return max(MIN_BID, min(bid, max_bid))
@@ -1557,10 +1791,15 @@ def run_optimization_logic(
                 continue
             group_floor = adgroup_floors.get(ad_group_id, min_bid_global)
             if rule["action"] == "🛑 止损":
-                new_bid = MIN_BID
+                new_bid = max(MIN_BID, min(min_bid_global, base_max_bid))
             else:
                 proposed = old_bid * rule["factor"]
-                allow_floor = old_bid < group_floor or rule.get("force_floor") or rule["factor"] >= 1.0
+                if rule.get("freeze_up") and proposed > old_bid:
+                    proposed = old_bid
+                allow_floor = (
+                    (not rule.get("freeze_floor"))
+                    and (old_bid < group_floor or rule.get("force_floor") or rule["factor"] >= 1.0)
+                )
                 new_bid = _apply_bid_limits(
                     old_bid,
                     proposed,
@@ -1640,10 +1879,15 @@ def run_optimization_logic(
             min_floor = auto_min_floors.get(auto_predicate, min_bid_global) if is_auto else min_bid_global
             min_floor = max(min_floor, group_floor)
             if rule["action"] == "🛑 止损":
-                new_bid = MIN_BID
+                new_bid = max(MIN_BID, min(min_bid_global, base_max_bid))
             else:
                 proposed = base_bid * rule["factor"] * weight
-                allow_floor = base_bid < min_floor or rule.get("force_floor") or rule["factor"] >= 1.0
+                if rule.get("freeze_up") and proposed > base_bid:
+                    proposed = base_bid
+                allow_floor = (
+                    (not rule.get("freeze_floor"))
+                    and (base_bid < min_floor or rule.get("force_floor") or rule["factor"] >= 1.0)
+                )
                 new_bid = _apply_bid_limits(
                     base_bid,
                     proposed,
@@ -1668,10 +1912,15 @@ def run_optimization_logic(
                 continue
             group_floor = adgroup_floors.get(str(ad_group_id), min_bid_global)
             if rule["action"] == "🛑 止损":
-                new_bid = MIN_BID
+                new_bid = max(MIN_BID, min(min_bid_global, base_max_bid))
             else:
                 proposed = old_bid * rule["factor"]
-                allow_floor = old_bid < group_floor or rule.get("force_floor") or rule["factor"] >= 1.0
+                if rule.get("freeze_up") and proposed > old_bid:
+                    proposed = old_bid
+                allow_floor = (
+                    (not rule.get("freeze_floor"))
+                    and (old_bid < group_floor or rule.get("force_floor") or rule["factor"] >= 1.0)
+                )
                 new_bid = _apply_bid_limits(
                     old_bid,
                     proposed,
@@ -1693,14 +1942,28 @@ def run_optimization_logic(
             campaign_id = c.get("campaignId", c.get("campaign_id"))
             if not campaign_id:
                 continue
+            current = {}
             bidding = c.get("bidding") or {}
             adjustments = bidding.get("adjustments") or []
-            current = {}
             for adj in adjustments:
                 predicate = adj.get("predicate")
                 pct = adj.get("percentage")
                 if predicate:
                     current[predicate] = pct if pct is not None else 0
+            dynamic_bidding = c.get("dynamicBidding") or {}
+            placement_bidding = dynamic_bidding.get("placementBidding") or []
+            placement_map = {
+                "PLACEMENT_TOP": "placementTop",
+                "PLACEMENT_PRODUCT_PAGE": "placementProductPage",
+                "PLACEMENT_REST_OF_SEARCH": "placementRestOfSearch",
+            }
+            for adj in placement_bidding:
+                placement = str(adj.get("placement") or "").upper()
+                predicate = placement_map.get(placement)
+                if not predicate:
+                    continue
+                pct = adj.get("percentage")
+                current[predicate] = pct if pct is not None else 0
             campaign_bids[str(campaign_id)] = current
 
         campaign_rule_keys = {}
@@ -1744,6 +2007,30 @@ def run_optimization_logic(
         target_ok = True
         adgroup_ok = True
         placement_ok = True
+        if freeze_bid_updates:
+            keyword_updates = []
+            target_updates = []
+            adgroup_updates = []
+            placement_updates = []
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            reason = freeze_bid_reason or "竞价数据不可用，保持原竞价投放"
+            logs.append(
+                {
+                    "时间": ts,
+                    "广告": "系统",
+                    "类型": "竞价",
+                    "动作": "SP 出价更新",
+                    "原价": 0,
+                    "新价": 0,
+                    "理由": reason,
+                }
+            )
+            with db_write_lock():
+                conn.execute(
+                    "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                    (ts, "系统", "SP 出价更新", 0, 0, reason, "跳过"),
+                )
+                conn.commit()
         if is_live_mode:
             for batch in _chunked(keyword_updates, 100):
                 ok, _ = update_sp_keyword_bids(session, headers, batch)
@@ -1812,6 +2099,8 @@ def run_optimization_logic(
 
         # === 自动否词：基于搜索词表现 ===
         auto_neg_cfg = _get_auto_negative_config(auto_negative_config)
+        if simple_mode:
+            auto_neg_cfg["enabled"] = False
         if auto_neg_cfg["enabled"]:
             level = auto_neg_cfg.get("level", "adgroup")
             match_type = _normalize_negative_match(auto_neg_cfg.get("match", "NEGATIVE_EXACT"))
@@ -2471,10 +2760,11 @@ def run_optimization_logic(
 
         # === 自动投词/拓词：基于搜索词表现 ===
         auto_expand_base = bool(allowed_campaign_ids) if whitelist else False
-        auto_expand_enabled = auto_expand_base and scale_up_allowed
-        if auto_expand_base and not scale_up_allowed:
+        auto_expand_enabled = auto_expand_base
+        harvest_scale_mode = bool(scale_up_allowed)
+        if auto_expand_base and not harvest_scale_mode:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            reason = "自动投词暂停：当前表现未达放量条件"
+            reason = "自动投词切换保守模式：仅收词(EXACT)，暂停放量型拓词"
             logs.append(
                 {
                     "时间": ts,
@@ -2489,19 +2779,19 @@ def run_optimization_logic(
             with db_write_lock():
                 conn.execute(
                     "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
-                    (ts, "系统", "SP 自动投词", 0, 0, reason, "暂停"),
+                    (ts, "系统", "SP 自动投词", 0, 0, reason, "保守"),
                 )
                 conn.commit()
         if auto_expand_enabled:
             expand_days = 7
             expand_min_clicks = 4
-            expand_min_orders = 1
-            expand_strong_clicks = 6
-            expand_strong_orders = 2
+            expand_min_orders = harvest_min_orders
+            expand_strong_clicks = 9999
+            expand_strong_orders = 9999
             expand_max_new = None
-            expand_acos_factor = 1.2
+            expand_acos_factor = 1.0
             expand_strong_acos_factor = 0.8
-            expand_allow_broad = True
+            expand_allow_broad = False
 
             end_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
             start_date = (today - timedelta(days=expand_days)).strftime("%Y-%m-%d")
@@ -2794,10 +3084,12 @@ def run_optimization_logic(
                             campaign_id = str(ad_group_campaign.get(ad_group_id, "") or "")
                         if not campaign_id or not ad_group_id:
                             continue
-                        if (campaign_id, ad_group_id, term_lower) in existing_term_any:
-                            continue
-                        if (campaign_id, "", term_lower) in neg_terms or (campaign_id, ad_group_id, term_lower) in neg_terms:
-                            continue
+                        source_campaign_id = campaign_id
+                        source_ad_group_id = ad_group_id
+                        source_ad_group_name = str(ad_group_name_map.get(source_ad_group_id, "") or "")
+                        source_bucket = _extract_bucket_key(
+                            source_ad_group_name, campaign_name_map.get(source_campaign_id, "")
+                        )
                         cost = float(r.get("cost") or 0)
                         sales = float(r.get("sales") or 0)
                         orders = float(r.get("orders") or 0)
@@ -2805,7 +3097,7 @@ def run_optimization_logic(
                         if sales <= 0 or orders < expand_min_orders or clicks < expand_min_clicks:
                             continue
                         target_acos = base_target_acos
-                        rule = ad_group_map.get(ad_group_id)
+                        rule = ad_group_map.get(source_ad_group_id)
                         if rule and rule.get("target_acos"):
                             target_acos = float(rule.get("target_acos") or base_target_acos)
                         acos_pct = cost / sales * 100 if sales > 0 else 0
@@ -2817,42 +3109,75 @@ def run_optimization_logic(
                             and acos_pct <= target_acos * expand_strong_acos_factor
                         )
                         match_types = ["EXACT"]
-                        if expand_allow_broad:
-                            match_types.append("BROAD")
-                        if strong:
-                            match_types.append("PHRASE")
                         avg_cpc = cost / clicks if clicks > 0 else base_max_bid * 0.6
-                        group_floor = adgroup_floors.get(str(ad_group_id), min_bid_global)
-                        base_bid = min(base_max_bid, max(group_floor, avg_cpc * (1.2 if strong else 1.1)))
                         for match_type in match_types:
                             if expand_max_new is not None and len(payloads) >= expand_max_new:
                                 break
-                            key = (campaign_id, ad_group_id, term_lower, match_type)
-                            if key in existing_kw:
-                                continue
-                            payloads.append(
-                                {
-                                    "campaignId": campaign_id,
-                                    "adGroupId": ad_group_id,
-                                    "state": "ENABLED",
-                                    "keywordText": term,
-                                    "matchType": match_type,
-                                    "bid": round(base_bid, 2),
-                                }
-                            )
-                            existing_kw.add(key)
-                            action_rows.append(
-                                {
-                                    "term": term,
-                                    "campaign_id": campaign_id,
-                                    "ad_group_id": ad_group_id,
-                                    "bid": round(base_bid, 2),
-                                    "match_type": match_type,
-                                    "acos": acos_pct,
-                                    "orders": orders,
-                                    "clicks": clicks,
-                                }
-                            )
+                            routed_groups = []
+                            if source_bucket:
+                                routed_groups = keyword_harvest_routes.get(source_bucket, {}).get(match_type, [])
+                            has_match_route = bool(routed_groups)
+                            if not routed_groups:
+                                routed_groups = [
+                                    {
+                                        "campaign_id": source_campaign_id,
+                                        "ad_group_id": source_ad_group_id,
+                                        "ad_group_name": source_ad_group_name,
+                                    }
+                                ]
+                            for dest in routed_groups:
+                                dest_campaign_id = str(dest.get("campaign_id") or source_campaign_id)
+                                dest_ad_group_id = str(dest.get("ad_group_id") or source_ad_group_id)
+                                if not dest_campaign_id or not dest_ad_group_id:
+                                    continue
+                                if allowed_campaign_ids is not None and dest_campaign_id not in allowed_campaign_ids:
+                                    continue
+                                if enabled_ad_groups is not None and dest_ad_group_id not in enabled_ad_groups:
+                                    continue
+                                if (dest_campaign_id, dest_ad_group_id, term_lower) in existing_term_any:
+                                    continue
+                                if (dest_campaign_id, "", term_lower) in neg_terms or (
+                                    dest_campaign_id,
+                                    dest_ad_group_id,
+                                    term_lower,
+                                ) in neg_terms:
+                                    continue
+                                key = (dest_campaign_id, dest_ad_group_id, term_lower, match_type)
+                                if key in existing_kw:
+                                    continue
+                                dest_floor = adgroup_floors.get(str(dest_ad_group_id), min_bid_global)
+                                dest_default = float(ad_group_default_bid.get(str(dest_ad_group_id), 0) or 0)
+                                if dest_default > 0:
+                                    dest_floor = max(dest_floor, min(dest_default, base_max_bid))
+                                base_bid = min(base_max_bid, max(dest_floor, avg_cpc * (1.2 if strong else 1.1)))
+                                payloads.append(
+                                    {
+                                        "campaignId": dest_campaign_id,
+                                        "adGroupId": dest_ad_group_id,
+                                        "state": "ENABLED",
+                                        "keywordText": term,
+                                        "matchType": match_type,
+                                        "bid": round(base_bid, 2),
+                                    }
+                                )
+                                existing_kw.add(key)
+                                action_rows.append(
+                                    {
+                                        "term": term,
+                                        "campaign_id": dest_campaign_id,
+                                        "ad_group_id": dest_ad_group_id,
+                                        "source_campaign_id": source_campaign_id,
+                                        "source_ad_group_id": source_ad_group_id,
+                                        "source_bucket": source_bucket,
+                                        "routed": has_match_route,
+                                        "bid": round(base_bid, 2),
+                                        "match_type": match_type,
+                                        "acos": acos_pct,
+                                        "orders": orders,
+                                        "clicks": clicks,
+                                    }
+                                )
+                                break
 
                     if payloads:
                         ok_all = True
@@ -2868,8 +3193,14 @@ def run_optimization_logic(
                         with db_write_lock():
                             for row in action_rows:
                                 campaign_label = campaign_name_map.get(row["campaign_id"], row["campaign_id"])
+                                source_campaign_label = campaign_name_map.get(
+                                    row.get("source_campaign_id"), row.get("source_campaign_id")
+                                )
+                                source_label = f"{source_campaign_label}/{row.get('source_ad_group_id')}"
+                                route_label = "关键词组路由" if row.get("routed") else "原广告组"
                                 reason = (
-                                    f"投词: {row['match_type']} | {campaign_label}/{row['ad_group_id']} | "
+                                    f"投词: {row['match_type']} | 目标 {campaign_label}/{row['ad_group_id']} | "
+                                    f"来源 {source_label} | {route_label} | "
                                     f"ACOS {row['acos']:.1f}% 点击{int(row['clicks'])} 订单{int(row['orders'])}"
                                 )
                                 logs.append(
@@ -2897,7 +3228,7 @@ def run_optimization_logic(
                                 )
                             conn.commit()
 
-                    if pool_enabled and pool_records and pool_daily_max > 0:
+                    if pool_enabled and pool_records and pool_daily_max > 0 and harvest_scale_mode:
                         today_prefix = datetime.now().strftime("%Y-%m-%d")
                         pool_used_today = 0
                         try:
@@ -3028,16 +3359,37 @@ def run_optimization_logic(
                                             ),
                                         )
                                     conn.commit()
+                    elif pool_enabled and pool_records and pool_daily_max > 0 and not harvest_scale_mode:
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        reason = "关键词池投词暂停：放量门控未开启"
+                        logs.append(
+                            {
+                                "时间": ts,
+                                "广告": "系统",
+                                "类型": "投词",
+                                "动作": "SP 关键词池投词",
+                                "原值": 0,
+                                "新值": 0,
+                                "原因": reason,
+                            }
+                        )
+                        with db_write_lock():
+                            conn.execute(
+                                "INSERT INTO automation_logs VALUES (?,?,?,?,?,?,?)",
+                                (ts, "系统", "SP 关键词池投词", 0, 0, reason, "暂停"),
+                            )
+                            conn.commit()
 
-    _run_continuous_learning(
-        conn,
-        logs,
-        today,
-        allowed_campaign_ids,
-        base_target_acos,
-        base_max_bid,
-        base_stop_loss,
-    )
+    if not simple_mode:
+        _run_continuous_learning(
+            conn,
+            logs,
+            today,
+            allowed_campaign_ids,
+            base_target_acos,
+            base_max_bid,
+            base_stop_loss,
+        )
     conn.commit()
     conn.close()
     return logs

@@ -265,6 +265,23 @@ def update_campaign_budget(session, headers, ad_type, campaign_id, new_budget, b
     return False, f"{res.status_code} {res.text}"
 
 
+def update_sp_campaign_states(session, headers, updates):
+    if not updates:
+        return True, None
+    media = CAMPAIGN_MEDIA.get("SP")
+    if not media:
+        return False, "missing SP campaign media"
+    h = get_media_headers(headers, media)
+    payload = {"campaigns": updates}
+    res = session.put("https://advertising-api.amazon.com/sp/campaigns", headers=h, json=payload, timeout=30)
+    if res.status_code in [200, 207]:
+        return True, res.json()
+    res2 = session.put("https://advertising-api.amazon.com/sp/campaigns", headers=h, json=updates, timeout=30)
+    if res2.status_code in [200, 207]:
+        return True, res2.json()
+    return False, f"{res.status_code} {res.text}"
+
+
 def update_sp_adgroup_bids(session, headers, updates):
     if not updates:
         return True, None
@@ -347,6 +364,59 @@ def update_sp_campaign_bidding(session, headers, updates):
     if not media:
         return False, "missing campaign media"
     h = get_media_headers(headers, media)
+
+    # Prefer v3 dynamicBidding payload; keep legacy bidding.adjustments fallback for compatibility.
+    placement_map = {
+        "placementTop": "PLACEMENT_TOP",
+        "placementProductPage": "PLACEMENT_PRODUCT_PAGE",
+        "placementRestOfSearch": "PLACEMENT_REST_OF_SEARCH",
+    }
+    converted = []
+    for update in updates:
+        campaign_id = str(update.get("campaignId", update.get("campaign_id")) or "").strip()
+        if not campaign_id:
+            continue
+        dynamic = update.get("dynamicBidding")
+        if isinstance(dynamic, dict) and dynamic.get("placementBidding"):
+            converted.append({"campaignId": campaign_id, "dynamicBidding": dynamic})
+            continue
+        bidding = update.get("bidding") or {}
+        adjustments = bidding.get("adjustments") or []
+        placement_bidding = []
+        for adj in adjustments:
+            placement = placement_map.get(str(adj.get("predicate") or "").strip())
+            if not placement:
+                continue
+            try:
+                pct = int(round(float(adj.get("percentage", 0) or 0)))
+            except Exception:
+                pct = 0
+            pct = max(0, min(900, pct))
+            placement_bidding.append({"placement": placement, "percentage": pct})
+        if not placement_bidding:
+            continue
+        strategy = str(bidding.get("strategy") or "MANUAL").strip().upper()
+        if strategy not in ["MANUAL", "AUTO_FOR_SALES", "LEGACY_FOR_SALES"]:
+            strategy = "MANUAL"
+        converted.append(
+            {
+                "campaignId": campaign_id,
+                "dynamicBidding": {
+                    "strategy": strategy,
+                    "placementBidding": placement_bidding,
+                },
+            }
+        )
+
+    if converted:
+        converted_payload = {"campaigns": converted}
+        res = session.put("https://advertising-api.amazon.com/sp/campaigns", headers=h, json=converted_payload, timeout=30)
+        if res.status_code in [200, 207]:
+            return True, res.json()
+        res2 = session.put("https://advertising-api.amazon.com/sp/campaigns", headers=h, json=converted, timeout=30)
+        if res2.status_code in [200, 207]:
+            return True, res2.json()
+
     payload = {"campaigns": updates}
     res = session.put("https://advertising-api.amazon.com/sp/campaigns", headers=h, json=payload, timeout=30)
     if res.status_code in [200, 207]:
