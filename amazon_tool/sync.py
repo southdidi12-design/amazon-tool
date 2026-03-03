@@ -36,6 +36,7 @@ from .config import (
 )
 from .config import get_real_today
 from .db import db_write_lock, get_latest_report_date, set_sync_status, set_system_value
+from .db import append_sync_perf_history
 
 SYNC_LOCK = threading.Lock()
 
@@ -884,6 +885,7 @@ def run_sync_task(days=7, status_box=None):
         + "; ".join(stage_logs[:8])
     )
     set_system_value("last_sync_perf", perf_summary)
+    append_sync_perf_history(perf_summary)
 
     if errors:
         set_sync_status("partial", errors[0], days)

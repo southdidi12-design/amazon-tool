@@ -1,5 +1,6 @@
 import pandas as pd
 import streamlit as st
+import json
 from datetime import date, datetime, timedelta
 
 from amazon_tool.automation import HAS_OPENAI
@@ -264,6 +265,7 @@ def _render_sidebar_panel():
                 AUTO_AI_LAST_RUN_KEY,
                 AUTO_AI_LEARNING_NOTE_KEY,
                 "last_sync_perf",
+                "sync_perf_history",
             ]
         )
         last_sync_ts = system_vals.get(AUTO_SYNC_TS_KEY) or "未执行"
@@ -281,6 +283,19 @@ def _render_sidebar_panel():
         sync_perf = system_vals.get("last_sync_perf")
         if sync_perf:
             st.caption(f"同步性能: {sync_perf}")
+        raw_perf_history = system_vals.get("sync_perf_history")
+        if raw_perf_history:
+            history_items = []
+            try:
+                payload = json.loads(raw_perf_history)
+                if isinstance(payload, list):
+                    history_items = [str(x) for x in payload if str(x).strip()]
+            except Exception:
+                history_items = [line.strip() for line in str(raw_perf_history).splitlines() if line.strip()]
+            if history_items:
+                st.caption("最近同步性能记录:")
+                for item in history_items[:5]:
+                    st.caption(f"- {item}")
         if sync_error:
             st.warning(sync_error)
 

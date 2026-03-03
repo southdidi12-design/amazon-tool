@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import sqlite3
@@ -424,6 +425,26 @@ def set_system_values(mapping):
             conn.commit()
         finally:
             conn.close()
+
+
+def append_sync_perf_history(summary, max_entries=8):
+    text = str(summary or "").strip()
+    if not text:
+        return
+    key = "sync_perf_history"
+    raw = get_system_value(key)
+    items = []
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                items = [str(x) for x in data if str(x).strip()]
+        except Exception:
+            items = [line.strip() for line in str(raw).splitlines() if line.strip()]
+    now = datetime.now().strftime("%m-%d %H:%M")
+    items.insert(0, f"[{now}] {text}")
+    items = items[: max(1, int(max_entries or 8))]
+    set_system_value(key, json.dumps(items, ensure_ascii=False))
 
 
 def set_sync_status(status, detail=None, days=None):
@@ -1073,6 +1094,7 @@ def run_sync_task(conf, days):
         + "; ".join(stage_logs[:8])
     )
     set_system_value("last_sync_perf", perf_summary)
+    append_sync_perf_history(perf_summary)
     print(f"Sync perf: {perf_summary}")
 
     if errors:
