@@ -3,7 +3,12 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from ..amazon_api import get_amazon_session_and_headers, list_sp_campaigns, update_sp_campaign_states
+from ..amazon_api import (
+    get_amazon_session_and_headers,
+    list_sp_campaigns,
+    update_sp_adgroup_bids,
+    update_sp_campaign_states,
+)
 from ..automation import run_optimization_logic
 from ..config import (
     AUTO_AI_BASELINE_MIN_KEY,
@@ -33,6 +38,7 @@ from ..config import (
     get_auto_ai_campaign_whitelist,
 )
 from ..db import get_db_connection, get_system_value, set_system_value
+from ..ml_autopilot import build_latest_recommendations, train_and_save_model
 
 
 def _get_float_setting(key, default):
@@ -113,6 +119,78 @@ def _one_click_disable_ai_ads():
     if failed > 0:
         return False, f"已关闭AI开关；活动暂停部分失败（成功{paused}，失败{failed}）"
     return True, f"已关闭AI开关，并暂停白名单活动 {paused} 个"
+
+
+def _build_bid_updates_from_recommendations(rec_df, max_change_pct=10, max_campaigns=20, max_bid=1.5):
+    if rec_df is None or rec_df.empty:
+        return pd.DataFrame(), []
+
+    actions = rec_df[rec_df["action"].isin(["提高出价", "降低出价"])].copy()
+    if actions.empty:
+        return pd.DataFrame(), []
+
+    actions["campaign_id"] = actions["campaign_id"].astype(str)
+    actions = actions.sort_values(["action", "acos"], ascending=[True, False]).head(max(1, int(max_campaigns)))
+
+    min_factor = 1.0 - max(1, int(max_change_pct)) / 100.0
+    max_factor = 1.0 + max(1, int(max_change_pct)) / 100.0
+    actions["safe_factor"] = actions["suggested_bid_factor"].clip(lower=min_factor, upper=max_factor)
+
+    conn = get_db_connection()
+    try:
+        adg = pd.read_sql_query(
+            """
+            SELECT ad_group_id, campaign_id, ad_group_name, default_bid
+            FROM ad_group_settings
+            WHERE ad_group_id IS NOT NULL
+            """,
+            conn,
+        )
+    except Exception:
+        adg = pd.DataFrame()
+    finally:
+        conn.close()
+
+    if adg.empty:
+        return pd.DataFrame(), []
+
+    adg["campaign_id"] = adg["campaign_id"].fillna("").astype(str)
+    adg["default_bid"] = pd.to_numeric(adg["default_bid"], errors="coerce").fillna(0.0)
+    adg = adg[adg["default_bid"] > 0].copy()
+    if adg.empty:
+        return pd.DataFrame(), []
+
+    merged = adg.merge(actions[["campaign_id", "campaign_name", "safe_factor", "action"]], on="campaign_id", how="inner")
+    if merged.empty:
+        return pd.DataFrame(), []
+
+    merged["new_bid"] = (merged["default_bid"] * merged["safe_factor"]).clip(lower=0.02, upper=float(max_bid))
+    merged["new_bid"] = merged["new_bid"].round(2)
+    merged["old_bid"] = merged["default_bid"].round(2)
+    merged = merged[merged["new_bid"] != merged["old_bid"]].copy()
+    if merged.empty:
+        return pd.DataFrame(), []
+
+    updates = [
+        {"adGroupId": str(r["ad_group_id"]), "defaultBid": float(r["new_bid"])}
+        for _, r in merged.iterrows()
+        if str(r.get("ad_group_id", "")).strip()
+    ]
+    view = merged[
+        ["campaign_name", "campaign_id", "ad_group_name", "ad_group_id", "action", "old_bid", "new_bid", "safe_factor"]
+    ].rename(
+        columns={
+            "campaign_name": "活动",
+            "campaign_id": "活动ID",
+            "ad_group_name": "广告组",
+            "ad_group_id": "广告组ID",
+            "action": "建议动作",
+            "old_bid": "当前出价",
+            "new_bid": "建议出价",
+            "safe_factor": "调整系数",
+        }
+    )
+    return view, updates
 
 
 def render_autopilot_tab():
@@ -211,6 +289,70 @@ def render_autopilot_tab():
             st.success("极简设置已保存")
 
     with c_log:
+        st.markdown("#### AI模型建议 (MVP)")
+        mc1, mc2 = st.columns([1, 1])
+        with mc1:
+            if st.button("训练模型", use_container_width=True):
+                try:
+                    r = train_and_save_model(days=180)
+                    st.success(f"训练完成: 样本{r.rows}，活动{r.campaigns}，MAE={r.mae:.4f}")
+                except Exception as exc:
+                    st.error(f"训练失败: {exc}")
+        with mc2:
+            if st.button("刷新建议", use_container_width=True):
+                st.session_state["ml_refresh_ts"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        rec_df = pd.DataFrame()
+        try:
+            rec_df = build_latest_recommendations()
+        except Exception as exc:
+            st.caption(f"模型建议不可用: {exc}")
+
+        if rec_df.empty:
+            st.info("暂无模型建议，请先点击“训练模型”。")
+        else:
+            st.dataframe(rec_df.head(60), use_container_width=True, hide_index=True)
+
+            ac1, ac2, ac3 = st.columns([1, 1, 1.4])
+            with ac1:
+                max_change_pct = st.slider("最大单次调价(%)", 5, 30, 10)
+            with ac2:
+                max_campaigns = st.slider("最多活动数", 5, 80, 20)
+            with ac3:
+                apply_live = st.checkbox("直接下发到Amazon", value=False)
+
+            plan_df, updates = _build_bid_updates_from_recommendations(
+                rec_df,
+                max_change_pct=max_change_pct,
+                max_campaigns=max_campaigns,
+                max_bid=max_bid,
+            )
+
+            if plan_df.empty:
+                st.caption("当前无可执行出价调整。")
+            else:
+                st.caption(f"可执行调整: {len(updates)} 条广告组出价")
+                st.dataframe(plan_df.head(80), use_container_width=True, hide_index=True)
+
+                if st.button("应用模型建议", type="primary", use_container_width=True):
+                    if not apply_live:
+                        st.success(f"模拟完成：共 {len(updates)} 条（未下发Amazon）")
+                    else:
+                        session, headers = get_amazon_session_and_headers()
+                        if not session:
+                            st.error("未检测到Amazon API配置，无法下发")
+                        else:
+                            failed = 0
+                            for batch in _chunked(updates, 100):
+                                ok, _ = update_sp_adgroup_bids(session, headers, batch)
+                                if not ok:
+                                    failed += len(batch)
+                            success = len(updates) - failed
+                            if failed:
+                                st.warning(f"下发部分成功：成功{success}，失败{failed}")
+                            else:
+                                st.success(f"下发成功：共 {success} 条")
+
         st.markdown("#### 自动驾驶日志")
         conn = get_db_connection()
         try:
