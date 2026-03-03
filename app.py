@@ -228,8 +228,6 @@ def _render_sidebar_panel():
         st.markdown("### 🎛️ 运营控制台")
         st.caption(f"版本: {VERSION}")
 
-        deepseek_key = st.text_input("DeepSeek Key", type="password", placeholder="输入后可用 AI 语义能力")
-
         engine_chip = "chip-ok" if HAS_OPENAI else "chip-warn"
         engine_text = "AI 引擎在线" if HAS_OPENAI else "AI 引擎离线"
         st.markdown(
@@ -339,7 +337,6 @@ def _render_sidebar_panel():
         show_advanced = st.checkbox("显示高级功能", value=False)
 
     return {
-        "deepseek_key": deepseek_key,
         "show_advanced": show_advanced,
         "target_name": target_name,
         "latest_report": latest_report,
@@ -597,7 +594,7 @@ else:
         render_dashboard_tab(df, trend)
 
     with tabs[1]:
-        render_autopilot_tab(ui_ctx["deepseek_key"])
+        render_autopilot_tab()
 
     with tabs[2]:
         render_manage_tab(df)

@@ -115,7 +115,7 @@ def _one_click_disable_ai_ads():
     return True, f"已关闭AI开关，并暂停白名单活动 {paused} 个"
 
 
-def render_autopilot_tab(deepseek_key):
+def render_autopilot_tab():
     c_set, c_log = st.columns([1, 2])
 
     with c_set:
@@ -153,7 +153,7 @@ def render_autopilot_tab(deepseek_key):
                     max_bid,
                     float(default_stop_loss),
                     mode.startswith("🔥"),
-                    deepseek_key,
+                    "",
                     auto_negative_config={"enabled": False},
                 )
                 s.update(label=f"✅ 完成：{len(logs)} 条动作", state="complete")
