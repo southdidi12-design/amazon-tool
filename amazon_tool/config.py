@@ -62,6 +62,10 @@ AUTO_AI_LEARNING_ENABLED_KEY = "auto_ai_learning_enabled"
 AUTO_AI_LEARNING_RATE_KEY = "auto_ai_learning_rate"
 AUTO_AI_LEARNING_LAST_DATE_KEY = "auto_ai_learning_last_date"
 AUTO_AI_LEARNING_NOTE_KEY = "auto_ai_learning_note"
+AUTO_MODEL_AUTO_TRAIN_ENABLED_KEY = "auto_model_auto_train_enabled"
+AUTO_MODEL_TRAIN_DAYS_KEY = "auto_model_train_days"
+AUTO_MODEL_LAST_TRAIN_DATE_KEY = "auto_model_last_train_date"
+AUTO_MODEL_LAST_TRAIN_STATUS_KEY = "auto_model_last_train_status"
 AUTO_AI_CAMPAIGN_WHITELIST = [
     "176597893951887",  # existing managed campaign (3305)
     "294775544176956",
