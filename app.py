@@ -264,6 +264,8 @@ def _render_sidebar_panel():
                 AUTO_AI_LEARNING_NOTE_KEY,
                 "last_sync_perf",
                 "sync_perf_history",
+                "auto_model_last_train_date",
+                "auto_model_last_train_status",
             ]
         )
         last_sync_ts = system_vals.get(AUTO_SYNC_TS_KEY) or "未执行"
@@ -294,6 +296,13 @@ def _render_sidebar_panel():
                 st.caption("最近同步性能记录:")
                 for item in history_items[:5]:
                     st.caption(f"- {item}")
+
+        model_train_date = system_vals.get("auto_model_last_train_date")
+        model_train_status = system_vals.get("auto_model_last_train_status")
+        if model_train_date or model_train_status:
+            st.caption(f"模型最近训练日期: {model_train_date or '-'}")
+            if model_train_status:
+                st.caption(f"模型训练状态: {model_train_status}")
         if sync_error:
             st.warning(sync_error)
 
