@@ -52,5 +52,15 @@ if ! "$PY_CMD" -c "import streamlit" >/dev/null 2>&1; then
   PY_CMD=".venv_mac/bin/python"
 fi
 
-(sleep 2; open "http://localhost:8501" >/dev/null 2>&1) &
+( 
+  for _ in {1..40}; do
+    for port in {8501..8510}; do
+      if nc -z localhost "$port" >/dev/null 2>&1; then
+        open "http://localhost:$port" >/dev/null 2>&1
+        exit 0
+      fi
+    done
+    sleep 1
+  done
+) &
 exec "$PY_CMD" -m streamlit run app.py --server.headless true --browser.gatherUsageStats false
