@@ -198,6 +198,30 @@ def get_system_value(key):
     return row[0] if row and row[0] is not None else None
 
 
+def get_system_values(keys):
+    if not keys:
+        return {}
+    uniq_keys = [str(k) for k in keys if k is not None and str(k) != ""]
+    if not uniq_keys:
+        return {}
+    placeholders = ",".join(["?"] * len(uniq_keys))
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            f"SELECT key, value FROM system_logs WHERE key IN ({placeholders})",
+            tuple(uniq_keys),
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+
+    result = {k: None for k in uniq_keys}
+    for key, value in rows:
+        result[key] = value
+    return result
+
+
 def set_system_value(key, value):
     with db_write_lock():
         conn = get_db_connection()
@@ -308,9 +332,9 @@ def get_dashboard_data(start, end):
     if "ad_type" in m.columns:
         m["ad_type"] = m["ad_type"].fillna(AD_TYPE_SP)
 
-    m["cpc"] = m.apply(lambda x: x["cost"] / x["clicks"] if x["clicks"] > 0 else 0, axis=1)
-    m["acos"] = m.apply(lambda x: x["cost"] / x["sales"] if x["sales"] > 0 else 0, axis=1)
-    m["cr"] = m.apply(lambda x: x["orders"] / x["clicks"] if x["clicks"] > 0 else 0, axis=1)
+    m["cpc"] = (m["cost"] / m["clicks"]).where(m["clicks"] > 0, 0)
+    m["acos"] = (m["cost"] / m["sales"]).where(m["sales"] > 0, 0)
+    m["cr"] = (m["orders"] / m["clicks"]).where(m["clicks"] > 0, 0)
     return m
 
 
@@ -340,9 +364,9 @@ def get_asin_dashboard_data(start, end):
     perf["sku"] = perf["sku"].fillna("")
     for c in ["cost", "sales", "clicks", "impressions", "orders"]:
         perf[c] = perf[c].fillna(0)
-    perf["cpc"] = perf.apply(lambda x: x["cost"] / x["clicks"] if x["clicks"] > 0 else 0, axis=1)
-    perf["acos"] = perf.apply(lambda x: x["cost"] / x["sales"] if x["sales"] > 0 else 0, axis=1)
-    perf["cr"] = perf.apply(lambda x: x["orders"] / x["clicks"] if x["clicks"] > 0 else 0, axis=1)
+    perf["cpc"] = (perf["cost"] / perf["clicks"]).where(perf["clicks"] > 0, 0)
+    perf["acos"] = (perf["cost"] / perf["sales"]).where(perf["sales"] > 0, 0)
+    perf["cr"] = (perf["orders"] / perf["clicks"]).where(perf["clicks"] > 0, 0)
     return perf
 
 

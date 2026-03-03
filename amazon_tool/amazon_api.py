@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -25,6 +27,9 @@ from .config import (
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 SECRETS_FILE = BASE_DIR / ".streamlit" / "secrets.toml"
+_SHARED_SESSION = None
+_SESSION_LOCK = threading.Lock()
+_TOKEN_CACHE = {}
 
 
 def parse_amazon_secrets(path):
@@ -81,9 +86,15 @@ def load_amazon_config():
 
 
 def get_retry_session():
-    session = requests.Session()
-    session.mount("https://", HTTPAdapter(max_retries=Retry(total=3, backoff_factor=1)))
-    return session
+    global _SHARED_SESSION
+    if _SHARED_SESSION is not None:
+        return _SHARED_SESSION
+    with _SESSION_LOCK:
+        if _SHARED_SESSION is None:
+            session = requests.Session()
+            session.mount("https://", HTTPAdapter(max_retries=Retry(total=3, backoff_factor=1)))
+            _SHARED_SESSION = session
+    return _SHARED_SESSION
 
 
 def get_amazon_session_and_headers():
@@ -92,18 +103,35 @@ def get_amazon_session_and_headers():
         return None, None
     session = get_retry_session()
     try:
-        r = session.post(
-            "https://api.amazon.com/auth/o2/token",
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": conf["refresh_token"],
-                "client_id": conf["client_id"],
-                "client_secret": conf["client_secret"],
-            },
-        )
-        token = r.json().get("access_token")
+        cache_key = f"{conf.get('client_id','')}|{conf.get('profile_id','')}"
+        now = time.time()
+        token = None
+
+        cached = _TOKEN_CACHE.get(cache_key)
+        if cached and cached.get("token") and float(cached.get("expires_at", 0)) > now:
+            token = cached.get("token")
+
         if not token:
-            return None, None
+            r = session.post(
+                "https://api.amazon.com/auth/o2/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": conf["refresh_token"],
+                    "client_id": conf["client_id"],
+                    "client_secret": conf["client_secret"],
+                },
+                timeout=30,
+            )
+            payload = r.json()
+            token = payload.get("access_token")
+            if not token:
+                return None, None
+            expires_in = int(payload.get("expires_in") or 3600)
+            _TOKEN_CACHE[cache_key] = {
+                "token": token,
+                "expires_at": now + max(60, expires_in - 60),
+            }
+
         headers = {
             "Authorization": f"Bearer {token}",
             "Amazon-Advertising-API-ClientId": conf["client_id"],

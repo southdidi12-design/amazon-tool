@@ -25,6 +25,7 @@ from amazon_tool.db import (
     get_db_connection,
     get_latest_report_date,
     get_product_ads_data,
+    get_system_values,
     get_system_value,
     get_trend_data,
     init_db,
@@ -246,10 +247,20 @@ def _render_sidebar_panel():
                     sync_status_ui.update(label="同步未启动（可能已有任务在运行）", state="error")
             st.rerun()
 
-        last_sync_ts = get_system_value(AUTO_SYNC_TS_KEY) or "未执行"
-        sync_status = get_system_value(SYNC_STATUS_KEY) or "未知"
-        sync_days = get_system_value(SYNC_DAYS_KEY) or "-"
-        sync_error = get_system_value(SYNC_ERROR_KEY)
+        system_vals = get_system_values(
+            [
+                AUTO_SYNC_TS_KEY,
+                SYNC_STATUS_KEY,
+                SYNC_DAYS_KEY,
+                SYNC_ERROR_KEY,
+                AUTO_AI_LAST_RUN_KEY,
+                AUTO_AI_LEARNING_NOTE_KEY,
+            ]
+        )
+        last_sync_ts = system_vals.get(AUTO_SYNC_TS_KEY) or "未执行"
+        sync_status = system_vals.get(SYNC_STATUS_KEY) or "未知"
+        sync_days = system_vals.get(SYNC_DAYS_KEY) or "-"
+        sync_error = system_vals.get(SYNC_ERROR_KEY)
         latest_report = get_latest_report_date() or "暂无"
         hours = max(1, int(AUTO_SYNC_INTERVAL_SECONDS / 3600))
         st.caption(f"自动同步频率: 每 {hours} 小时回补最近 {AUTO_SYNC_REFRESH_DAYS} 天")
@@ -287,11 +298,11 @@ def _render_sidebar_panel():
         neg_text = "自动否词开启" if auto_neg_enabled else "自动否词关闭"
         st.markdown(f"<span class='status-chip {neg_chip}'>{neg_text}</span>", unsafe_allow_html=True)
 
-        last_auto = get_system_value(AUTO_AI_LAST_RUN_KEY)
+        last_auto = system_vals.get(AUTO_AI_LAST_RUN_KEY)
         if last_auto:
             st.caption(f"最近自动驾驶: {last_auto}")
 
-        learning_note = get_system_value(AUTO_AI_LEARNING_NOTE_KEY)
+        learning_note = system_vals.get(AUTO_AI_LEARNING_NOTE_KEY)
         if learning_note:
             st.caption(f"最近学习: {learning_note}")
 
