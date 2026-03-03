@@ -499,6 +499,7 @@ def sync_campaign_report(
     d_str,
     allow_retry=True,
 ):
+    written_rows = 0
     try:
         req = _post_report_with_throttle_retry(
             session,
@@ -541,9 +542,9 @@ def sync_campaign_report(
                         d_str,
                         allow_retry=False,
                     )
-            return False, f"{ad_product} {d_str} invalid columns"
+            return False, f"{ad_product} {d_str} invalid columns", written_rows
         else:
-            return False, f"{ad_product} {d_str} create failed {req.status_code}: {req.text[:200]}"
+            return False, f"{ad_product} {d_str} create failed {req.status_code}: {req.text[:200]}", written_rows
         if rid:
             poll_wait_seconds = REPORT_POLL_SLEEP_SECONDS
             for _ in range(REPORT_POLL_MAX):
@@ -596,18 +597,19 @@ def sync_campaign_report(
                                         "INSERT OR REPLACE INTO campaign_reports (date, campaign_id, campaign_name, ad_type, cost, sales, clicks, impressions, orders) VALUES (?,?,?,?,?,?,?,?,?)",
                                         rows,
                                     )
+                                written_rows = len(rows)
                                 db.commit()
                                 db.close()
-                            return True, None
-                        return True, None
-                    return False, f"{ad_product} {d_str} completed without url"
+                            return True, None, written_rows
+                        return True, None, written_rows
+                    return False, f"{ad_product} {d_str} completed without url", written_rows
                 if status in ["FAILED", "CANCELLED"]:
-                    return False, f"{ad_product} {d_str} status {status}"
-            return False, f"{ad_product} {d_str} timeout"
-        return False, f"{ad_product} {d_str} missing reportId"
+                    return False, f"{ad_product} {d_str} status {status}", written_rows
+            return False, f"{ad_product} {d_str} timeout", written_rows
+        return False, f"{ad_product} {d_str} missing reportId", written_rows
     except Exception as exc:
-        return False, f"{ad_product} {d_str} exception: {exc}"
-    return True, None
+        return False, f"{ad_product} {d_str} exception: {exc}", written_rows
+    return True, None, written_rows
 
 
 def sync_asin_report(
@@ -638,6 +640,7 @@ def sync_asin_report(
         orders_keys = ["purchases7d", "purchases14d", "purchases1d", "orders"]
 
     errors = []
+    written_rows = 0
     try:
         req = _post_report_with_throttle_retry(
             session,
@@ -678,7 +681,7 @@ def sync_asin_report(
                         allow_retry=False,
                     )
             errors.append(f"ASIN {d_str} invalid columns")
-            return errors
+            return errors, written_rows
         elif (
             allow_retry
             and req.status_code == 400
@@ -765,6 +768,7 @@ def sync_asin_report(
                                         "INSERT OR REPLACE INTO asin_reports VALUES (?,?,?,?,?,?,?,?)",
                                         rows,
                                     )
+                                written_rows = len(rows)
                                 db.commit()
                                 db.close()
                     break
@@ -775,10 +779,11 @@ def sync_asin_report(
                 errors.append(f"ASIN {d_str} timeout")
     except Exception as exc:
         errors.append(f"ASIN {d_str} exception: {exc}")
-    return errors
+    return errors, written_rows
 
 
 def run_sync_task(days=7, status_box=None):
+    started_at = time.perf_counter()
     session, headers = get_amazon_session_and_headers()
     if not session:
         if status_box:
@@ -786,34 +791,45 @@ def run_sync_task(days=7, status_box=None):
         set_sync_status("no_config", "missing amazon secrets", days)
         return False
     set_sync_status("running", "", days)
+    stage_logs = []
+    total_rows = 0
 
     # 2. Settings (Campaign List)
+    stage_start = time.perf_counter()
     try:
         sync_campaign_list(session, headers, AD_TYPE_SP)
         sync_campaign_list(session, headers, AD_TYPE_SB)
         sync_campaign_list(session, headers, AD_TYPE_SD)
     except Exception:
         pass
+    stage_logs.append(f"campaign_list={time.perf_counter() - stage_start:.1f}s")
 
     # 2.1 SP Ad Groups
+    stage_start = time.perf_counter()
     try:
         sync_sp_adgroups(session, headers)
     except Exception:
         pass
+    stage_logs.append(f"adgroups={time.perf_counter() - stage_start:.1f}s")
 
     # 2.2 Product Ads
+    stage_start = time.perf_counter()
     try:
         sync_product_ads(session, headers)
     except Exception:
         pass
+    stage_logs.append(f"product_ads={time.perf_counter() - stage_start:.1f}s")
 
     # 3. Reports
     errors = []
     dates_to_sync = _compute_sync_dates(days)
+    report_start = time.perf_counter()
     for d_str in dates_to_sync:
+        date_start = time.perf_counter()
+        date_rows = 0
         if status_box:
             status_box.text(f"📥 同步中: {d_str}")
-        ok, err = sync_campaign_report(
+        ok, err, rows = sync_campaign_report(
             session,
             headers,
             "SPONSORED_PRODUCTS",
@@ -824,9 +840,10 @@ def run_sync_task(days=7, status_box=None):
             ["purchases7d", "purchases14d", "purchases1d", "orders"],
             d_str,
         )
+        date_rows += rows
         if not ok and err:
             errors.append(err)
-        ok, err = sync_campaign_report(
+        ok, err, rows = sync_campaign_report(
             session,
             headers,
             "SPONSORED_BRANDS",
@@ -837,9 +854,10 @@ def run_sync_task(days=7, status_box=None):
             ["attributedconversions14d", "attributedconversions7d", "attributedunitsordered14d", "orders"],
             d_str,
         )
+        date_rows += rows
         if not ok and err:
             errors.append(err)
-        ok, err = sync_campaign_report(
+        ok, err, rows = sync_campaign_report(
             session,
             headers,
             "SPONSORED_DISPLAY",
@@ -850,12 +868,27 @@ def run_sync_task(days=7, status_box=None):
             ["attributedconversions14d", "attributedconversions7d", "attributedunitsordered14d", "orders"],
             d_str,
         )
+        date_rows += rows
         if not ok and err:
             errors.append(err)
-        errors.extend(sync_asin_report(session, headers, d_str))
+        asin_errors, asin_rows = sync_asin_report(session, headers, d_str)
+        date_rows += asin_rows
+        errors.extend(asin_errors)
+        total_rows += date_rows
+        stage_logs.append(f"{d_str}={time.perf_counter() - date_start:.1f}s/{date_rows}rows")
+
+    stage_logs.append(f"reports={time.perf_counter() - report_start:.1f}s")
+    total_elapsed = time.perf_counter() - started_at
+    perf_summary = (
+        f"elapsed={total_elapsed:.1f}s; dates={len(dates_to_sync)}; rows={total_rows}; "
+        + "; ".join(stage_logs[:8])
+    )
+    set_system_value("last_sync_perf", perf_summary)
 
     if errors:
         set_sync_status("partial", errors[0], days)
     else:
         set_sync_status("ok", "", days)
-    return True
+    if status_box:
+        status_box.text(f"⏱️ 同步耗时 {total_elapsed:.1f}s，写入 {total_rows} 行")
+    return len(errors) == 0
