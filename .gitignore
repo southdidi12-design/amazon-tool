@@ -1,3 +1,5 @@
 .streamlit/secrets.toml
 get_token.py
 reports/
+*.db-wal
+*.db-shm
