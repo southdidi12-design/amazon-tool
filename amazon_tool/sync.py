@@ -570,6 +570,7 @@ def sync_campaign_report(
                             with db_write_lock():
                                 db = _connect_db()
                                 data.columns = [c.lower() for c in data.columns]
+                                rows = []
                                 for _, row in data.iterrows():
                                     campaign_id = row.get("campaignid", row.get("campaign_id", ""))
                                     if not str(campaign_id).strip():
@@ -577,8 +578,7 @@ def sync_campaign_report(
                                     cost = get_row_value(row, ["cost", "spend"], 0)
                                     sales = get_row_value(row, sales_keys, 0)
                                     orders = get_row_value(row, orders_keys, 0)
-                                    db.execute(
-                                        "INSERT OR REPLACE INTO campaign_reports (date, campaign_id, campaign_name, ad_type, cost, sales, clicks, impressions, orders) VALUES (?,?,?,?,?,?,?,?,?)",
+                                    rows.append(
                                         (
                                             d_str,
                                             str(campaign_id),
@@ -589,7 +589,12 @@ def sync_campaign_report(
                                             get_row_value(row, ["clicks"], 0),
                                             get_row_value(row, ["impressions"], 0),
                                             orders,
-                                        ),
+                                        )
+                                    )
+                                if rows:
+                                    db.executemany(
+                                        "INSERT OR REPLACE INTO campaign_reports (date, campaign_id, campaign_name, ad_type, cost, sales, clicks, impressions, orders) VALUES (?,?,?,?,?,?,?,?,?)",
+                                        rows,
                                     )
                                 db.commit()
                                 db.close()
@@ -732,6 +737,7 @@ def sync_asin_report(
                             with db_write_lock():
                                 db = _connect_db()
                                 data.columns = [c.lower() for c in data.columns]
+                                rows = []
                                 for _, row in data.iterrows():
                                     asin = row.get("advertisedasin", row.get("asin", ""))
                                     if pd.isna(asin) or not str(asin).strip():
@@ -742,8 +748,7 @@ def sync_asin_report(
                                     cost = get_row_value(row, ["cost", "spend"], 0)
                                     sales = get_row_value(row, sales_keys, 0)
                                     orders = get_row_value(row, orders_keys, 0)
-                                    db.execute(
-                                        "INSERT OR REPLACE INTO asin_reports VALUES (?,?,?,?,?,?,?,?)",
+                                    rows.append(
                                         (
                                             d_str,
                                             str(asin),
@@ -753,7 +758,12 @@ def sync_asin_report(
                                             row.get("clicks", 0),
                                             row.get("impressions", 0),
                                             orders,
-                                        ),
+                                        )
+                                    )
+                                if rows:
+                                    db.executemany(
+                                        "INSERT OR REPLACE INTO asin_reports VALUES (?,?,?,?,?,?,?,?)",
+                                        rows,
                                     )
                                 db.commit()
                                 db.close()
