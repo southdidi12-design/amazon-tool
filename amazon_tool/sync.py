@@ -3,6 +3,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 try:
@@ -206,6 +207,7 @@ def _resolve_asin_columns(base_columns, allowed, sales_candidates, orders_candid
 
 
 def _connect_db():
+    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30)
     try:
         db.execute("PRAGMA journal_mode=WAL;")

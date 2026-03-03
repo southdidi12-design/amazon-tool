@@ -233,12 +233,28 @@ def set_system_value(key, value):
             conn.close()
 
 
+def set_system_values(mapping):
+    if not mapping:
+        return
+    rows = [(str(key), value) for key, value in mapping.items() if key is not None and str(key) != ""]
+    if not rows:
+        return
+    with db_write_lock():
+        conn = get_db_connection()
+        try:
+            conn.executemany("INSERT OR REPLACE INTO system_logs (key, value) VALUES (?, ?)", rows)
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def set_sync_status(status, detail=None, days=None):
-    set_system_value(SYNC_STATUS_KEY, status)
+    updates = {SYNC_STATUS_KEY: status}
     if detail is not None:
-        set_system_value(SYNC_ERROR_KEY, detail[:1000])
+        updates[SYNC_ERROR_KEY] = detail[:1000]
     if days is not None:
-        set_system_value(SYNC_DAYS_KEY, str(days))
+        updates[SYNC_DAYS_KEY] = str(days)
+    set_system_values(updates)
 
 
 def get_bid_baselines():
