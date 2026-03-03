@@ -1,0 +1,3 @@
+[submodule "prd_docs/amazon-keyword-clean"]
+	path = prd_docs/amazon-keyword-clean
+	url = https://github.com/TechTerryDev/amazon-keyword-clean.git
