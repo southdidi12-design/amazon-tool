@@ -300,15 +300,16 @@ def get_dashboard_data(start, end):
     conn = get_db_connection()
     try:
         perf = pd.read_sql_query(
-            f"""
+            """
             SELECT campaign_id, COALESCE(ad_type, 'SP') as ad_type,
                    SUM(cost) as cost, SUM(sales) as sales,
                    SUM(clicks) as clicks, SUM(impressions) as impressions, SUM(orders) as orders
             FROM campaign_reports
-            WHERE date >= '{start}' AND date <= '{end}'
+            WHERE date >= ? AND date <= ?
             GROUP BY campaign_id, ad_type
             """,
             conn,
+            params=(start, end),
         )
         sett = pd.read_sql_query("SELECT * FROM campaign_settings", conn)
     except Exception:
@@ -343,15 +344,16 @@ def get_asin_dashboard_data(start, end):
     conn = get_db_connection()
     try:
         perf = pd.read_sql_query(
-            f"""
+            """
             SELECT asin, sku,
                    SUM(cost) as cost, SUM(sales) as sales,
                    SUM(clicks) as clicks, SUM(impressions) as impressions, SUM(orders) as orders
             FROM asin_reports
-            WHERE date >= '{start}' AND date <= '{end}'
+            WHERE date >= ? AND date <= ?
             GROUP BY asin, sku
             """,
             conn,
+            params=(start, end),
         )
     except Exception:
         return pd.DataFrame()
@@ -412,11 +414,12 @@ def get_trend_data(start, end):
     conn = get_db_connection()
     try:
         df = pd.read_sql_query(
-            f"""
+            """
             SELECT date, SUM(cost) as cost, SUM(sales) as sales
-            FROM campaign_reports WHERE date >= '{start}' AND date <= '{end}' GROUP BY date ORDER BY date
+            FROM campaign_reports WHERE date >= ? AND date <= ? GROUP BY date ORDER BY date
             """,
             conn,
+            params=(start, end),
         )
         return df.set_index("date")
     except Exception:
