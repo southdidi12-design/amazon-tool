@@ -263,6 +263,7 @@ def _render_sidebar_panel():
                 SYNC_ERROR_KEY,
                 AUTO_AI_LAST_RUN_KEY,
                 AUTO_AI_LEARNING_NOTE_KEY,
+                "last_sync_perf",
             ]
         )
         last_sync_ts = system_vals.get(AUTO_SYNC_TS_KEY) or "未执行"
@@ -277,6 +278,9 @@ def _render_sidebar_panel():
         st.caption(f"最近同步时间: {last_sync_ts}")
         st.caption(f"同步状态: {sync_status} (天数: {sync_days})")
         st.caption(f"最新数据日期: {latest_report}")
+        sync_perf = system_vals.get("last_sync_perf")
+        if sync_perf:
+            st.caption(f"同步性能: {sync_perf}")
         if sync_error:
             st.warning(sync_error)
 
