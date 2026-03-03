@@ -3,6 +3,10 @@ setlocal
 
 cd /d "%~dp0\.."
 
+if exist "db_path.txt" (
+  set /p HNV_DB_FILE=<db_path.txt
+)
+
 if exist ".venv\Scripts\python.exe" (
   ".venv\Scripts\python.exe" "scripts\automation_job.py"
   exit /b %ERRORLEVEL%

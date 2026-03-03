@@ -54,6 +54,7 @@ def db_write_lock(timeout=30, poll_interval=0.2):
 
 
 def get_db_connection():
+    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")

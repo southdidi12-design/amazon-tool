@@ -14,7 +14,19 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DB_FILE = BASE_DIR / "hnv_erp_permanent.db"
+
+
+def _resolve_db_file():
+    raw = os.getenv("HNV_DB_FILE", "").strip()
+    if not raw:
+        return BASE_DIR / "hnv_erp_permanent.db"
+    db_path = Path(raw)
+    if not db_path.is_absolute():
+        db_path = (BASE_DIR / db_path).resolve()
+    return db_path
+
+
+DB_FILE = _resolve_db_file()
 SECRETS_FILE = BASE_DIR / ".streamlit" / "secrets.toml"
 LOCK_FILE = DB_FILE.with_suffix(".write.lock")
 
@@ -290,6 +302,7 @@ def load_amazon_config() -> dict:
 
 
 def get_db_connection():
+    DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")

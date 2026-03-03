@@ -6,6 +6,14 @@ cd /d "%~dp0"
 echo 正在启动 HNV 广告看板...
 echo 请勿关闭此窗口...
 
+:: 2.1 可选：从 db_path.txt 读取共享数据库路径（第一行）
+if exist "db_path.txt" (
+    set /p HNV_DB_FILE=<db_path.txt
+    if not "%HNV_DB_FILE%"=="" (
+        echo 使用共享数据库: %HNV_DB_FILE%
+    )
+)
+
 :: 3. 使用 python -m 启动 (比直接用 streamlit 更稳定)
 python -m streamlit run app.py
 

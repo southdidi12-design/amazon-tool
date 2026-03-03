@@ -6,7 +6,21 @@ from pathlib import Path
 VERSION = "V72.0 (All-In-One Complete)"
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DB_FILE = str(BASE_DIR / "hnv_erp_permanent.db")
+DEFAULT_DB_FILE = BASE_DIR / "hnv_erp_permanent.db"
+
+
+def _resolve_db_file():
+    raw = os.getenv("HNV_DB_FILE", "").strip()
+    if not raw:
+        db_path = DEFAULT_DB_FILE
+    else:
+        db_path = Path(raw)
+        if not db_path.is_absolute():
+            db_path = (BASE_DIR / db_path).resolve()
+    return str(db_path)
+
+
+DB_FILE = _resolve_db_file()
 AD_TYPE_SP = "SP"
 AD_TYPE_SB = "SB"
 AD_TYPE_SD = "SD"

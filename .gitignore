@@ -3,3 +3,4 @@ get_token.py
 reports/
 *.db-wal
 *.db-shm
+db_path.txt

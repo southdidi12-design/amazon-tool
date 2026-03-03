@@ -1,0 +1,4 @@
+# 把本文件复制为 db_path.txt，并把第一行改成你的共享数据库绝对路径（不要保留注释行）
+# Windows 示例：C:\Users\你的用户名\OneDrive\hnv-data\hnv_erp_permanent.db
+# macOS 示例：/Users/你的用户名/Library/Mobile Documents/com~apple~CloudDocs/hnv-data/hnv_erp_permanent.db
+/absolute/path/to/hnv_erp_permanent.db
