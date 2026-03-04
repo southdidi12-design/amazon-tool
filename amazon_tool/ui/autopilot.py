@@ -30,6 +30,7 @@ from ..config import (
     AUTO_NEGATIVE_LEVEL_KEY,
     AUTO_NEGATIVE_MATCH_KEY,
     AUTO_NEGATIVE_SPEND_KEY,
+    get_auto_ai_campaign_exclusions,
     get_auto_ai_campaign_whitelist,
 )
 from ..db import get_db_connection, get_system_value, set_system_value
@@ -79,6 +80,10 @@ def _one_click_disable_ai_ads():
         return False, "已关闭AI开关，但未检测到Amazon API配置，未执行活动暂停"
 
     whitelist = [w.strip() for w in get_auto_ai_campaign_whitelist() if str(w).strip()]
+    exclusions = [w.strip() for w in get_auto_ai_campaign_exclusions() if str(w).strip()]
+    if exclusions:
+        exclusion_set = {str(w).strip() for w in exclusions if str(w).strip()}
+        whitelist = [w for w in whitelist if str(w).strip() not in exclusion_set]
     if not whitelist:
         return True, "已关闭AI开关；白名单为空，无需暂停活动"
     whitelist_set = {str(w).strip() for w in whitelist}
