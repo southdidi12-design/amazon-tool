@@ -16,6 +16,7 @@ from amazon_tool.config import (
     SYNC_ERROR_KEY,
     SYNC_STATUS_KEY,
     VERSION,
+    get_auto_ai_campaign_exclusions,
     get_auto_ai_campaign_whitelist,
     get_real_today,
 )
@@ -263,6 +264,10 @@ def _render_sidebar_panel():
         st.markdown("#### 🤖 托管状态")
 
         whitelist = [w for w in get_auto_ai_campaign_whitelist() if str(w).strip()]
+        exclusions = [w for w in get_auto_ai_campaign_exclusions() if str(w).strip()]
+        if exclusions:
+            exclusion_set = {str(w).strip() for w in exclusions if str(w).strip()}
+            whitelist = [w for w in whitelist if str(w).strip() not in exclusion_set]
         campaign_df, id_to_name, name_to_id = _load_campaign_mappings()
         display_whitelist, resolved_names = _resolve_whitelist_display(whitelist, id_to_name, name_to_id)
         ai_enabled = _get_bool_setting(AUTO_AI_ENABLED_KEY, False)
@@ -275,6 +280,8 @@ def _render_sidebar_panel():
             st.caption("；".join(display_whitelist[:3]) + ("；..." if len(display_whitelist) > 3 else ""))
         else:
             st.caption("托管活动: 未配置")
+        if exclusions:
+            st.caption(f"排除活动: {len(exclusions)} 个")
 
         if not ai_enabled:
             st.markdown("<span class='status-chip chip-warn'>托管未开启</span>", unsafe_allow_html=True)
