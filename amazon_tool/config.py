@@ -88,6 +88,9 @@ AUTO_AI_CAMPAIGN_WHITELIST = [
     "277059222932077",
     "292545543361874",
 ]
+AUTO_AI_CAMPAIGN_BLACKLIST = [
+    "A0765987346RQ82QNCPBV",
+]
 AUTO_AI_CAMPAIGN_DAILY_BUDGET = 10.0
 AUTO_NEGATIVE_ENABLED_KEY = "auto_negative_enabled"
 AUTO_NEGATIVE_LEVEL_KEY = "auto_negative_level"
@@ -127,6 +130,13 @@ def get_auto_ai_campaign_whitelist():
     if env_val:
         return _parse_env_list(env_val)
     return AUTO_AI_CAMPAIGN_WHITELIST
+
+
+def get_auto_ai_campaign_blacklist():
+    env_val = os.getenv("AUTO_AI_CAMPAIGN_BLACKLIST")
+    if env_val:
+        return _parse_env_list(env_val)
+    return AUTO_AI_CAMPAIGN_BLACKLIST
 
 
 def get_auto_ai_campaign_daily_budget():

@@ -61,6 +61,7 @@ from .config import (
     MIN_BID,
     REPORT_POLL_MAX,
     REPORT_POLL_SLEEP_SECONDS,
+    get_auto_ai_campaign_blacklist,
     get_auto_ai_campaign_whitelist,
     get_real_today,
 )
@@ -1121,18 +1122,30 @@ def run_optimization_logic(
         campaigns = list_sp_campaigns(session, headers, include_extended=True)
 
         whitelist = [w.strip() for w in get_auto_ai_campaign_whitelist() if str(w).strip()]
+        blacklist = [w.strip() for w in get_auto_ai_campaign_blacklist() if str(w).strip()]
         allowed_campaign_ids = None
         campaign_name_map = {}
-        if whitelist:
-            whitelist_set = {str(w).strip() for w in whitelist if str(w).strip()}
+        blacklist_campaign_ids = set()
+        if campaigns:
             for c in campaigns:
                 campaign_id = c.get("campaignId", c.get("campaign_id"))
                 if campaign_id is None:
                     continue
                 campaign_name_map[str(campaign_id)] = str(c.get("name", "")).strip()
+
+        if blacklist and campaign_name_map:
+            blacklist_set = {str(w).strip() for w in blacklist if str(w).strip()}
+            blacklist_campaign_ids = {
+                cid for cid, name in campaign_name_map.items() if cid in blacklist_set or name in blacklist_set
+            }
+
+        if whitelist:
+            whitelist_set = {str(w).strip() for w in whitelist if str(w).strip()}
             allowed_campaign_ids = {
                 cid for cid, name in campaign_name_map.items() if cid in whitelist_set or name in whitelist_set
             }
+            if blacklist_campaign_ids:
+                allowed_campaign_ids = {cid for cid in allowed_campaign_ids if cid not in blacklist_campaign_ids}
             if not allowed_campaign_ids:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 reason = f"未匹配到白名单活动: {', '.join(whitelist)}"
@@ -1155,6 +1168,8 @@ def run_optimization_logic(
                     conn.commit()
                 conn.close()
                 return logs
+        elif blacklist_campaign_ids and campaign_name_map:
+            allowed_campaign_ids = {cid for cid in campaign_name_map.keys() if cid not in blacklist_campaign_ids}
 
         scale_up_allowed = True
         scale_up_prefix = f"极简模式：仅执行 ACOS 调价 + 精准收词（订单≥{harvest_min_orders}）"
