@@ -3,6 +3,7 @@ import os
 import sqlite3
 import time
 from datetime import date, datetime
+import platform
 
 import pandas as pd
 
@@ -18,39 +19,48 @@ from .config import (
 
 LOCK_FILE = str(Path(DB_FILE).with_suffix(".write.lock"))
 
+# Cross-platform process locking
+try:
+    if platform.system() == 'Windows':
+        import msvcrt
+        def lock_file(f):
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        def unlock_file(f):
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        def lock_file(f):
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        def unlock_file(f):
+            fcntl.flock(f, fcntl.LOCK_UN)
+except ImportError:
+    pass
 
 @contextlib.contextmanager
 def db_write_lock(timeout=30, poll_interval=0.2):
     start = time.time()
-    fd = None
+    f = None
     while True:
         try:
-            fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            os.write(fd, f"{os.getpid()} {time.time()}".encode("utf-8"))
+            f = open(LOCK_FILE, 'a')
+            lock_file(f)
             break
-        except FileExistsError:
-            try:
-                if time.time() - os.path.getmtime(LOCK_FILE) > timeout * 4:
-                    os.remove(LOCK_FILE)
-                    continue
-            except Exception:
-                pass
+        except (IOError, OSError):
+            if f:
+                f.close()
+                f = None
             if time.time() - start >= timeout:
                 raise TimeoutError("db write lock timeout")
             time.sleep(poll_interval)
     try:
         yield
     finally:
-        try:
-            if fd is not None:
-                os.close(fd)
-        except Exception:
-            pass
-        try:
-            if os.path.exists(LOCK_FILE):
-                os.remove(LOCK_FILE)
-        except Exception:
-            pass
+        if f:
+            try:
+                unlock_file(f)
+            except Exception:
+                pass
+            f.close()
 
 
 def get_db_connection():

@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 from datetime import date, datetime, timedelta
 
-from amazon_tool.automation import HAS_OPENAI
+from amazon_tool.ai import HAS_OPENAI
 from amazon_tool.config import (
     AUTO_AI_ENABLED_KEY,
     AUTO_AI_LAST_RUN_KEY,
@@ -411,31 +411,21 @@ def _render_ai_log_center(target_name):
         st.caption(f"最近自动驾驶运行: {last_run}")
 
     today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # Load campaign map for resolve
     conn = get_db_connection()
     try:
-        logs_df = pd.read_sql_query(
-            "SELECT * FROM automation_logs WHERE timestamp LIKE ? ORDER BY timestamp DESC",
-            conn,
-            params=(f"{today_str}%",),
-        )
         campaign_df = pd.read_sql_query("SELECT campaign_id, campaign_name FROM campaign_settings", conn)
     except Exception:
-        logs_df = pd.DataFrame()
         campaign_df = pd.DataFrame()
     finally:
         conn.close()
-
-    if logs_df.empty:
-        st.info("今日暂无托管动作记录。")
-        return
 
     id_to_name = {}
     if not campaign_df.empty:
         campaign_df["campaign_id"] = campaign_df["campaign_id"].fillna("").astype(str)
         campaign_df["campaign_name"] = campaign_df["campaign_name"].fillna("").astype(str)
         id_to_name = dict(zip(campaign_df["campaign_id"], campaign_df["campaign_name"]))
-
-    logs_df = logs_df.copy()
 
     def _display_object(raw_value):
         raw = str(raw_value or "")
@@ -445,15 +435,7 @@ def _render_ai_log_center(target_name):
             return f"{cname} ({cid})" if cname else raw
         return raw
 
-    logs_df["对象"] = logs_df["campaign_name"].apply(_display_object)
-    status_series = logs_df["status"].fillna("").astype(str)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("今日动作数", len(logs_df))
-    c2.metric("已执行", int((status_series == "已执行").sum()))
-    c3.metric("失败/部分失败", int((status_series.isin(["失败", "部分失败"])).sum()))
-    c4.metric("模拟/暂停/锁定", int((status_series.isin(["模拟", "暂停", "锁定"])).sum()))
-
+    # UI Filters
     filter_col1, filter_col2, filter_col3 = st.columns([1.4, 1, 1.6])
     with filter_col1:
         default_kw = target_name if target_name else ""
@@ -464,19 +446,54 @@ def _render_ai_log_center(target_name):
         status_options = ["已执行", "部分失败", "失败", "模拟", "暂停", "锁定"]
         selected_status = st.multiselect("状态筛选", status_options, default=status_options)
 
-    filtered = logs_df.copy()
-    if keyword:
-        filtered = filtered[filtered["对象"].astype(str).str.contains(keyword, na=False)]
-    if action_keyword:
-        filtered = filtered[filtered["action_type"].astype(str).str.contains(action_keyword, na=False)]
-    if selected_status:
-        filtered = filtered[filtered["status"].astype(str).isin(selected_status)]
+    # Dynamic SQL Push Down
+    sql_query = "SELECT * FROM automation_logs WHERE timestamp LIKE ?"
+    params = [f"{today_str}%"]
 
-    if filtered.empty:
+    if keyword:
+        sql_query += " AND campaign_name LIKE ?"
+        params.append(f"%{keyword}%")
+    if action_keyword:
+        sql_query += " AND action_type LIKE ?"
+        params.append(f"%{action_keyword}%")
+    if selected_status:
+        placeholders = ",".join(["?"] * len(selected_status))
+        sql_query += f" AND status IN ({placeholders})"
+        params.extend(selected_status)
+
+    sql_query += " ORDER BY timestamp DESC"
+
+    conn = get_db_connection()
+    try:
+        logs_df = pd.read_sql_query(sql_query, conn, params=params)
+        
+        # Get raw stats just for today
+        stats_df = pd.read_sql_query("SELECT status FROM automation_logs WHERE timestamp LIKE ?", conn, params=(f"{today_str}%",))
+    except Exception:
+        logs_df = pd.DataFrame()
+        stats_df = pd.DataFrame()
+    finally:
+        conn.close()
+
+    if stats_df.empty and logs_df.empty:
+        st.info("今日暂无托管动作记录。")
+        return
+
+    stats_series = stats_df["status"].fillna("").astype(str)
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("今日动作数", len(stats_df))
+    c2.metric("已执行", int((stats_series == "已执行").sum()))
+    c3.metric("失败/部分失败", int((stats_series.isin(["失败", "部分失败"])).sum()))
+    c4.metric("模拟/暂停/锁定", int((stats_series.isin(["模拟", "暂停", "锁定"])).sum()))
+
+    if logs_df.empty:
         st.info("筛选后无匹配记录。")
         return
 
-    display_df = filtered.rename(
+    logs_df["对象"] = logs_df["campaign_name"].apply(_display_object)
+
+    display_df = logs_df.rename(
         columns={
             "timestamp": "时间",
             "action_type": "动作",
