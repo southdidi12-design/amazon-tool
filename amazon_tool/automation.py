@@ -61,6 +61,7 @@ from .config import (
     MIN_BID,
     REPORT_POLL_MAX,
     REPORT_POLL_SLEEP_SECONDS,
+    get_auto_ai_campaign_exclusions,
     get_auto_ai_campaign_whitelist,
     get_real_today,
 )
@@ -1121,17 +1122,23 @@ def run_optimization_logic(
         campaigns = list_sp_campaigns(session, headers, include_extended=True)
 
         whitelist = [w.strip() for w in get_auto_ai_campaign_whitelist() if str(w).strip()]
+        exclusions = [w.strip() for w in get_auto_ai_campaign_exclusions() if str(w).strip()]
         allowed_campaign_ids = None
         campaign_name_map = {}
         if whitelist:
             whitelist_set = {str(w).strip() for w in whitelist if str(w).strip()}
+            exclusion_set = {str(w).strip() for w in exclusions if str(w).strip()}
             for c in campaigns:
                 campaign_id = c.get("campaignId", c.get("campaign_id"))
                 if campaign_id is None:
                     continue
                 campaign_name_map[str(campaign_id)] = str(c.get("name", "")).strip()
             allowed_campaign_ids = {
-                cid for cid, name in campaign_name_map.items() if cid in whitelist_set or name in whitelist_set
+                cid
+                for cid, name in campaign_name_map.items()
+                if (cid in whitelist_set or name in whitelist_set)
+                and cid not in exclusion_set
+                and name not in exclusion_set
             }
             if not allowed_campaign_ids:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
